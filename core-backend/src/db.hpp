@@ -23,6 +23,7 @@ public:
   void init_sync_state() {
     execute(entities::SYNC_STATE_DDL);
     execute(entities::ENTITY_STATS_META_DDL);
+    execute(entities::INDEXER_FAIL_META_DDL);
   }
   void init_entity(const entities::EntityDef *entity) { execute(entity->ddl); }
 

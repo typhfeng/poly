@@ -1,13 +1,11 @@
+from backend_api import BACKEND_API
+from graph_status import get_graph_status_stream
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from pathlib import Path
 import httpx
 import json
-
-BACKEND_API = "http://127.0.0.1:8001"
-
-from graph_status import get_graph_status_stream
 
 app = FastAPI(title="Polymarket Data Explorer")
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
@@ -28,11 +26,11 @@ async def index(request: Request):
     stats = backend_get("/api/stats", default={})
     sync_state_data = backend_get("/api/sync", default=[])
     sync_state = [
-        (r.get("source"), r.get("entity"), r.get("last_id"), 
+        (r.get("source"), r.get("entity"), r.get("last_id"),
          r.get("last_sync_at"), r.get("total_synced"))
         for r in sync_state_data
     ] if isinstance(sync_state_data, list) else []
-    
+
     return templates.TemplateResponse("index.html", {
         "request": request,
         "stats": stats,
@@ -52,13 +50,24 @@ async def api_entity_stats():
     return backend_get("/api/entity-stats")
 
 
+@app.get("/api/entity-latest")
+async def api_entity_latest(entity: str = Query(...)):
+    """API: 获取某个 entity 最近一条记录（用于 hover）"""
+    return backend_get("/api/entity-latest", {"entity": entity})
+
+@app.get("/api/indexer-fails")
+async def api_indexer_fails(source: str = Query(...), entity: str = Query(...)):
+    """API: 获取某个 source/entity 的 indexer 失败计数"""
+    return backend_get("/api/indexer-fails", {"source": source, "entity": entity}, default=[])
+
+
 @app.get("/api/graph-status-stream")
 async def api_graph_status_stream():
     """API: 流式获取 The Graph 节点状态 (SSE)"""
     async def event_generator():
         async for event in get_graph_status_stream():
             yield f"data: {json.dumps(event)}\n\n"
-    
+
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",

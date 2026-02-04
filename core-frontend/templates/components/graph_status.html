@@ -488,6 +488,8 @@
         } else {
           window._graphData = data.data;
           container.innerHTML = renderGraphSources(data.data);
+          attachEntityLatestHover();
+          attachIndexerFailHover();
           startEntityStatsPolling();
         }
       }
@@ -516,6 +518,89 @@
 
     pollStats();
     _entityStatsTimer = setInterval(pollStats, 2000);
+  }
+
+  // hover 时按需拉取最近一条 entity 数据（带 schema）
+  function _entityLatestTitle(entity, data) {
+    if (!data || typeof data !== "object") return "无数据";
+    const table = data.table || "";
+    const cols = Array.isArray(data.columns) ? data.columns : [];
+    const row = data.row ?? null;
+
+    const colsText = cols
+      .map((c) => `${c.name || ""} ${c.type || ""}`.trim())
+      .filter((s) => s.length)
+      .join("\n");
+
+    let rowText = row === null ? "null" : JSON.stringify(row, null, 2);
+    if (rowText.length > 2000)
+      rowText = rowText.slice(0, 2000) + "\n...truncated";
+
+    return (
+      `Entity: ${entity}\n` +
+      (table ? `Table: ${table}\n` : "") +
+      `\nSchema:\n${colsText || "(empty)"}\n` +
+      `\nLatest row:\n${rowText}`
+    );
+  }
+
+  function attachEntityLatestHover() {
+    document.querySelectorAll(".ds-entity-row .name").forEach((el) => {
+      if (el.dataset.latestHoverBound === "1") return;
+      el.dataset.latestHoverBound = "1";
+
+      el.addEventListener("mouseenter", async () => {
+        const row = el.closest(".ds-entity-row");
+        const entity = row?.dataset?.entity || el.textContent || "";
+        if (!entity) return;
+
+        el.title = "加载最近一条数据...";
+
+        const data = await fetch(
+          `/api/entity-latest?entity=${encodeURIComponent(entity)}`,
+        ).then((r) => (r.ok ? r.json() : null));
+        el.title = _entityLatestTitle(entity, data);
+      });
+    });
+  }
+
+  // hover success 时按需拉取 indexer 失败计数
+  function attachIndexerFailHover() {
+    document
+      .querySelectorAll(".ds-entity-row [data-field='success']")
+      .forEach((successEl) => {
+        const host = successEl.parentElement;
+        if (!host || host.dataset.indexerFailBound === "1") return;
+        host.dataset.indexerFailBound = "1";
+
+        host.addEventListener("mouseenter", async () => {
+          if (host.dataset.indexerFailInFlight === "1") return;
+          const row = host.closest(".ds-entity-row");
+          const source = row?.dataset?.source || "";
+          const entity = row?.dataset?.entity || "";
+          if (!source || !entity) return;
+
+          host.dataset.indexerFailInFlight = "1";
+          try {
+            const rows = await fetch(
+              `/api/indexer-fails?source=${encodeURIComponent(source)}&entity=${encodeURIComponent(entity)}`,
+            ).then((r) => (r.ok ? r.json() : []));
+
+            let text = "";
+            if (Array.isArray(rows) && rows.length) {
+              const lines = rows
+                .slice(0, 10)
+                .map((r) => `${r.indexer}: ${r.fail_requests}`);
+              text = `\nIndexers(BadResponse失败 top10):\n` + lines.join("\n");
+            }
+
+            host.dataset.indexerFailText = text;
+            host.title = (host.dataset.baseTitle || host.title || "") + text;
+          } finally {
+            host.dataset.indexerFailInFlight = "0";
+          }
+        });
+      });
   }
 
   function updateEntityStatsUI(stats) {
@@ -574,9 +659,12 @@
         const fJson = stat.fail_json ?? 0;
         const fGql = stat.fail_graphql ?? 0;
         const fFmt = stat.fail_format ?? 0;
-        successEl.parentElement.title =
+        const host = successEl.parentElement;
+        const baseTitle =
           `成功率 ${rate.toFixed(1)}% (${succ}/${tot})\n` +
           `失败分类：网络 ${fNet}，JSON ${fJson}，GraphQL ${fGql}，格式 ${fFmt}`;
+        host.dataset.baseTitle = baseTitle;
+        host.title = baseTitle + (host.dataset.indexerFailText || "");
       }
 
       // 更新 size (MB)

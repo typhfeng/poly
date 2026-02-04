@@ -67,6 +67,10 @@ private:
       // 路由
       if (target.starts_with("/api/sql")) {
         handle_sql();
+      } else if (target.starts_with("/api/indexer-fails")) {
+        handle_indexer_fails();
+      } else if (target.starts_with("/api/entity-latest")) {
+        handle_entity_latest();
       } else if (target.starts_with("/api/entity-stats")) {
         handle_entity_stats();
       } else if (target.starts_with("/api/stats")) {
@@ -158,6 +162,53 @@ private:
     res_.set(http::field::content_type, "application/json");
     res_.result(http::status::ok);
     res_.body() = EntityStatsManager::instance().get_all_dump();
+  }
+
+  void handle_entity_latest() {
+    res_.set(http::field::content_type, "application/json");
+
+    std::string entity = get_param("entity");
+    assert(!entity.empty() && "Missing query parameter 'entity'");
+
+    const entities::EntityDef *e =
+        entities::find_entity(entity.c_str(), entities::MAIN_ENTITIES, entities::MAIN_ENTITY_COUNT);
+    if (!e) {
+      e = entities::find_entity(entity.c_str(), entities::PNL_ENTITIES, entities::PNL_ENTITY_COUNT);
+    }
+    assert(e && "Unknown entity");
+
+    json schema = db_.query_json(std::string("PRAGMA table_info('") + e->table + "')");
+    json rows = db_.query_json(std::string("SELECT * FROM ") + e->table + " ORDER BY id DESC LIMIT 1");
+    json row = rows.empty() ? json(nullptr) : rows[0];
+
+    json result = {
+        {"entity", e->name},
+        {"table", e->table},
+        {"columns", schema},
+        {"row", row},
+    };
+
+    res_.result(http::status::ok);
+    res_.body() = result.dump();
+  }
+
+  void handle_indexer_fails() {
+    res_.set(http::field::content_type, "application/json");
+    std::string source = get_param("source");
+    std::string entity = get_param("entity");
+    assert(!source.empty() && "Missing query parameter 'source'");
+    assert(!entity.empty() && "Missing query parameter 'entity'");
+
+    std::string sql =
+        "SELECT indexer, fail_requests "
+        "FROM indexer_fail_meta "
+        "WHERE source = " +
+        entities::escape_sql(source) +
+        " AND entity = " + entities::escape_sql(entity) +
+        " ORDER BY fail_requests DESC";
+    json rows = db_.query_json(sql);
+    res_.result(http::status::ok);
+    res_.body() = rows.dump();
   }
 
   void do_write() {

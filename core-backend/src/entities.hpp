@@ -125,6 +125,17 @@ CREATE TABLE IF NOT EXISTS entity_stats_meta (
     PRIMARY KEY (source, entity)
 ))";
 
+// indexer 维度失败计数（只有失败能归因到具体 indexer）
+inline const char *INDEXER_FAIL_META_DDL = R"(
+CREATE TABLE IF NOT EXISTS indexer_fail_meta (
+    source VARCHAR NOT NULL,
+    entity VARCHAR NOT NULL,
+    indexer VARCHAR NOT NULL,
+    fail_requests BIGINT DEFAULT 0,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (source, entity, indexer)
+))";
+
 // ============================================================================
 // Entity 定义结构
 // ============================================================================

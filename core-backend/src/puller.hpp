@@ -358,6 +358,52 @@ inline void EntityPuller::on_response(const std::string &body) {
   // GraphQL 错误 - 重试
   if (j.contains("errors")) {
     stats.record_failure(source_name_, entity_->name, FailureKind::GRAPHQL, latency_ms);
+    // 尝试从错误里解析 bad indexers（只有失败能归因到具体 indexer）
+    if (j["errors"].is_array()) {
+      for (auto &err : j["errors"]) {
+        if (!err.contains("message") || !err["message"].is_string())
+          continue;
+        const std::string msg = err["message"].get<std::string>();
+        const std::string k = "bad indexers:";
+        auto p = msg.find(k);
+        if (p == std::string::npos)
+          continue;
+        auto lb = msg.find('{', p);
+        auto rb = msg.find('}', lb == std::string::npos ? p : lb + 1);
+        if (lb == std::string::npos || rb == std::string::npos || rb <= lb)
+          continue;
+        std::string inside = msg.substr(lb + 1, rb - lb - 1);
+
+        auto trim = [](std::string s) {
+          size_t b = 0;
+          while (b < s.size() && (s[b] == ' ' || s[b] == '\t' || s[b] == '\n' || s[b] == '\r'))
+            ++b;
+          size_t e = s.size();
+          while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t' || s[e - 1] == '\n' || s[e - 1] == '\r'))
+            --e;
+          return s.substr(b, e - b);
+        };
+
+        size_t pos = 0;
+        while (pos < inside.size()) {
+          auto comma = inside.find(',', pos);
+          std::string part = (comma == std::string::npos) ? inside.substr(pos) : inside.substr(pos, comma - pos);
+          pos = (comma == std::string::npos) ? inside.size() : comma + 1;
+          part = trim(std::move(part));
+          if (part.empty())
+            continue;
+          auto colon = part.find(':');
+          if (colon == std::string::npos)
+            continue;
+          std::string indexer = trim(part.substr(0, colon));
+          std::string reason = trim(part.substr(colon + 1));
+          // 不要多算：Unavailable 是正常情况；只统计 BadResponse
+          if (!indexer.empty() && reason.starts_with("BadResponse")) {
+            stats.record_indexer_fail(source_name_, entity_->name, indexer);
+          }
+        }
+      }
+    }
     std::cerr << "[Pull] " << entity_->name << " GraphQL 错误: " << j["errors"].dump() << std::endl;
     std::cerr << "[Pull] " << entity_->name << " 5秒后重试" << std::endl;
     pool_.schedule_retry([this]() { send_request(); }, 5000);

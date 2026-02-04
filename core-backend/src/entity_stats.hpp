@@ -221,6 +221,30 @@ public:
     }
   }
 
+  // indexer 维度失败计数（只有失败能归因）
+  void record_indexer_fail(const std::string &source, const std::string &entity, const std::string &indexer) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    assert(!indexer.empty());
+    auto key = make_indexer_key(source, entity, indexer);
+    auto &st = indexer_fail_[key];
+    st.source = source;
+    st.entity = entity;
+    st.indexer = indexer;
+    if (!st.loaded && db_) {
+      load_indexer_fail_from_db_unsafe(st);
+      st.loaded = true;
+    }
+    ++st.fail_requests;
+
+    auto now = std::chrono::steady_clock::now();
+    if (st.last_persist.time_since_epoch().count() == 0)
+      st.last_persist = now;
+    if ((now - st.last_persist) >= kPersistInterval) {
+      save_indexer_fail_to_db_unsafe(st);
+      st.last_persist = now;
+    }
+  }
+
   // 获取所有统计（JSON dump 字符串；用于 HTTP 直接返回，避免重复序列化）
   const std::string &get_all_dump() {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -234,6 +258,22 @@ private:
   std::string make_key(const std::string &source, const std::string &entity) {
     return source + "/" + entity;
   }
+
+  struct IndexerFailStat {
+    std::string source;
+    std::string entity;
+    std::string indexer;
+    int64_t fail_requests = 0;
+    bool loaded = false;
+    std::chrono::steady_clock::time_point last_persist{};
+  };
+
+  std::string make_indexer_key(const std::string &source, const std::string &entity, const std::string &indexer) {
+    return source + "/" + entity + "/" + indexer;
+  }
+
+  void load_indexer_fail_from_db_unsafe(IndexerFailStat &st);
+  void save_indexer_fail_to_db_unsafe(const IndexerFailStat &st);
 
   void rebuild_cache_if_needed_unsafe() {
     auto now = std::chrono::steady_clock::now();
@@ -302,6 +342,7 @@ private:
 
   std::mutex mutex_;
   std::unordered_map<std::string, EntityStat> stats_;
+  std::unordered_map<std::string, IndexerFailStat> indexer_fail_;
   Database *db_ = nullptr;
 
   // 缓存（避免频繁构建/序列化）
@@ -365,5 +406,31 @@ inline void EntityStatsManager::save_to_db(const EntityStat &stat) {
       std::to_string(stat.total_rows_synced) + ", " +
       std::to_string(stat.total_api_time_ms) + ", " +
       std::to_string(stat.success_rate) + ", CURRENT_TIMESTAMP)";
+  db_->execute(sql);
+}
+
+inline void EntityStatsManager::load_indexer_fail_from_db_unsafe(IndexerFailStat &st) {
+  assert(db_);
+  std::string sql =
+      "SELECT fail_requests FROM indexer_fail_meta WHERE source = " +
+      entities::escape_sql(st.source) +
+      " AND entity = " + entities::escape_sql(st.entity) +
+      " AND indexer = " + entities::escape_sql(st.indexer);
+  auto result = db_->query_json(sql);
+  if (!result.empty() && result[0].contains("fail_requests")) {
+    st.fail_requests = result[0]["fail_requests"].get<int64_t>();
+  }
+}
+
+inline void EntityStatsManager::save_indexer_fail_to_db_unsafe(const IndexerFailStat &st) {
+  assert(db_);
+  std::string sql =
+      "INSERT OR REPLACE INTO indexer_fail_meta "
+      "(source, entity, indexer, fail_requests, updated_at) "
+      "VALUES (" +
+      entities::escape_sql(st.source) + ", " +
+      entities::escape_sql(st.entity) + ", " +
+      entities::escape_sql(st.indexer) + ", " +
+      std::to_string(st.fail_requests) + ", CURRENT_TIMESTAMP)";
   db_->execute(sql);
 }

@@ -7,7 +7,7 @@ from typing import Optional, AsyncGenerator
 import httpx
 from functools import lru_cache
 
-from main import BACKEND_API
+from backend_api import BACKEND_API
 
 # 常量
 CHAIN_RPCS = {
