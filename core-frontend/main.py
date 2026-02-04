@@ -27,13 +27,15 @@ async def index(request: Request):
     try:
         conn = get_db()
         
-        # 各表行数
+        # 各表行数（与 entities.hpp 定义一致）
         tables = [
-            "split", "merge", "redemption", "neg_risk_conversion",
-            "user_position", "neg_risk_event", "condition",
-            "order_filled_event", "orderbook", "market_data",
-            "market_open_interest", "global_open_interest",
-            "fixed_product_market_maker", "fpmm_transaction"
+            # main subgraph
+            "condition", "split", "merge", "redemption",
+            "account", "enriched_order_filled", "orderbook",
+            "market_data", "market_position", "market_profit",
+            "fpmm", "fpmm_transaction", "global",
+            # pnl subgraph
+            "user_position", "pnl_condition", "neg_risk_event", "pnl_fpmm"
         ]
         
         for table in tables:
@@ -46,7 +48,7 @@ async def index(request: Request):
         # 同步状态
         try:
             sync_state = conn.execute(
-                "SELECT subgraph_id, entity_name, last_id, last_sync_at FROM sync_state ORDER BY last_sync_at DESC"
+                "SELECT source, entity, last_id, last_sync_at, total_synced FROM sync_state ORDER BY last_sync_at DESC"
             ).fetchall()
         except:
             sync_state = []
@@ -70,8 +72,11 @@ async def api_stats():
     
     stats = {}
     tables = [
-        "split", "merge", "redemption", "user_position",
-        "order_filled_event", "orderbook"
+        "condition", "split", "merge", "redemption",
+        "account", "enriched_order_filled", "orderbook",
+        "market_data", "market_position", "market_profit",
+        "fpmm", "fpmm_transaction", "global",
+        "user_position", "pnl_condition", "neg_risk_event", "pnl_fpmm"
     ]
     
     for table in tables:
@@ -123,6 +128,7 @@ async def api_positions(
 async def api_orders(
     maker: str = Query(None, description="Maker 地址"),
     taker: str = Query(None, description="Taker 地址"),
+    market_id: str = Query(None, description="Market ID"),
     start_time: int = Query(None, description="开始时间戳"),
     end_time: int = Query(None, description="结束时间戳"),
     limit: int = Query(100, le=1000),
@@ -131,7 +137,7 @@ async def api_orders(
     """API: 查询订单成交"""
     conn = get_db()
     
-    sql = "SELECT * FROM order_filled_event WHERE 1=1"
+    sql = "SELECT * FROM enriched_order_filled WHERE 1=1"
     params = []
     
     if maker:
@@ -141,6 +147,10 @@ async def api_orders(
     if taker:
         sql += " AND taker = ?"
         params.append(taker)
+    
+    if market_id:
+        sql += " AND market_id = ?"
+        params.append(market_id)
     
     if start_time:
         sql += " AND timestamp >= ?"
@@ -154,8 +164,8 @@ async def api_orders(
     
     try:
         result = conn.execute(sql, params).fetchall()
-        columns = ["id", "transaction_hash", "timestamp", "order_hash", "maker", "taker",
-                   "maker_asset_id", "taker_asset_id", "maker_amount_filled", "taker_amount_filled", "fee"]
+        columns = ["id", "transaction_hash", "timestamp", "maker", "taker", 
+                   "order_hash", "market_id", "side", "size", "price"]
         data = [dict(zip(columns, row)) for row in result]
     except Exception as e:
         data = {"error": str(e)}
@@ -167,7 +177,7 @@ async def api_orders(
 @app.get("/api/splits")
 async def api_splits(
     stakeholder: str = Query(None, description="用户地址"),
-    condition: str = Query(None, description="Condition ID"),
+    condition_id: str = Query(None, description="Condition ID"),
     limit: int = Query(100, le=1000),
     offset: int = Query(0)
 ):
@@ -181,15 +191,16 @@ async def api_splits(
         sql += " AND stakeholder = ?"
         params.append(stakeholder)
     
-    if condition:
-        sql += " AND condition = ?"
-        params.append(condition)
+    if condition_id:
+        sql += " AND condition_id = ?"
+        params.append(condition_id)
     
     sql += f" ORDER BY timestamp DESC LIMIT {limit} OFFSET {offset}"
     
     try:
         result = conn.execute(sql, params).fetchall()
-        columns = ["id", "timestamp", "stakeholder", "condition", "amount"]
+        columns = ["id", "timestamp", "stakeholder", "collateral_token", 
+                   "parent_collection_id", "condition_id", "partition", "amount"]
         data = [dict(zip(columns, row)) for row in result]
     except Exception as e:
         data = {"error": str(e)}
@@ -201,7 +212,7 @@ async def api_splits(
 @app.get("/api/merges")
 async def api_merges(
     stakeholder: str = Query(None, description="用户地址"),
-    condition: str = Query(None, description="Condition ID"),
+    condition_id: str = Query(None, description="Condition ID"),
     limit: int = Query(100, le=1000),
     offset: int = Query(0)
 ):
@@ -215,15 +226,16 @@ async def api_merges(
         sql += " AND stakeholder = ?"
         params.append(stakeholder)
     
-    if condition:
-        sql += " AND condition = ?"
-        params.append(condition)
+    if condition_id:
+        sql += " AND condition_id = ?"
+        params.append(condition_id)
     
     sql += f" ORDER BY timestamp DESC LIMIT {limit} OFFSET {offset}"
     
     try:
         result = conn.execute(sql, params).fetchall()
-        columns = ["id", "timestamp", "stakeholder", "condition", "amount"]
+        columns = ["id", "timestamp", "stakeholder", "collateral_token",
+                   "parent_collection_id", "condition_id", "partition", "amount"]
         data = [dict(zip(columns, row)) for row in result]
     except Exception as e:
         data = {"error": str(e)}
@@ -235,7 +247,7 @@ async def api_merges(
 @app.get("/api/redemptions")
 async def api_redemptions(
     redeemer: str = Query(None, description="用户地址"),
-    condition: str = Query(None, description="Condition ID"),
+    condition_id: str = Query(None, description="Condition ID"),
     limit: int = Query(100, le=1000),
     offset: int = Query(0)
 ):
@@ -249,15 +261,16 @@ async def api_redemptions(
         sql += " AND redeemer = ?"
         params.append(redeemer)
     
-    if condition:
-        sql += " AND condition = ?"
-        params.append(condition)
+    if condition_id:
+        sql += " AND condition_id = ?"
+        params.append(condition_id)
     
     sql += f" ORDER BY timestamp DESC LIMIT {limit} OFFSET {offset}"
     
     try:
         result = conn.execute(sql, params).fetchall()
-        columns = ["id", "timestamp", "redeemer", "condition", "index_sets", "payout"]
+        columns = ["id", "timestamp", "redeemer", "collateral_token",
+                   "parent_collection_id", "condition_id", "index_sets", "payout"]
         data = [dict(zip(columns, row)) for row in result]
     except Exception as e:
         data = {"error": str(e)}

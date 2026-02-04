@@ -284,14 +284,16 @@
                 {% if sync_state %}
                 <table class="sync-table">
                     <tr>
-                        <th>Subgraph</th>
+                        <th>Source</th>
                         <th>Entity</th>
+                        <th>已同步</th>
                         <th>最后同步</th>
                     </tr>
                     {% for row in sync_state[:10] %}
                     <tr>
-                        <td class="truncate mono">{{ row[0][:20] }}...</td>
+                        <td>{{ row[0] }}</td>
                         <td>{{ row[1] }}</td>
+                        <td>{{ "{:,}".format(row[4]) if row[4] else 0 }}</td>
                         <td>{{ row[3] }}</td>
                     </tr>
                     {% endfor %}
@@ -339,9 +341,9 @@
             <div class="api-links">
                 <span style="color: #888;">示例:</span>
                 <a href="#" onclick="setSQL('SELECT * FROM user_position ORDER BY realized_pnl DESC LIMIT 20')">Top PnL</a>
-                <a href="#" onclick="setSQL('SELECT * FROM order_filled_event ORDER BY timestamp DESC LIMIT 20')">最新订单</a>
+                <a href="#" onclick="setSQL('SELECT * FROM enriched_order_filled ORDER BY timestamp DESC LIMIT 20')">最新订单</a>
                 <a href="#" onclick="setSQL('SELECT * FROM split ORDER BY timestamp DESC LIMIT 20')">最新 Split</a>
-                <a href="#" onclick="setSQL('SELECT COUNT(*) as cnt, maker FROM order_filled_event GROUP BY maker ORDER BY cnt DESC LIMIT 20')">活跃 Maker</a>
+                <a href="#" onclick="setSQL('SELECT COUNT(*) as cnt, maker FROM enriched_order_filled GROUP BY maker ORDER BY cnt DESC LIMIT 20')">活跃 Maker</a>
             </div>
         </div>
         

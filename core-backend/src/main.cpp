@@ -31,7 +31,10 @@ int main(int argc, char* argv[]) {
     
     std::cout << "[Main] API Key: " << config.api_key.substr(0, 8) << "..." << std::endl;
     std::cout << "[Main] DB Path: " << config.db_path << std::endl;
-    std::cout << "[Main] Subgraphs: " << config.subgraphs.size() << std::endl;
+    std::cout << "[Main] Active Sources: " << config.sources.size() << std::endl;
+    for (const auto& src : config.sources) {
+        std::cout << "[Main]   - " << src.name << " (" << src.entities.size() << " entities)" << std::endl;
+    }
     
     Database db(config.db_path);
     
