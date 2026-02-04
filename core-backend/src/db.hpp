@@ -18,7 +18,10 @@ public:
   }
 
   // 表初始化
-  void init_sync_state() { execute(entities::SYNC_STATE_DDL); }
+  void init_sync_state() {
+    execute(entities::SYNC_STATE_DDL);
+    execute(entities::ENTITY_STATS_META_DDL);
+  }
   void init_entity(const entities::EntityDef *entity) { execute(entity->ddl); }
 
   // 事务

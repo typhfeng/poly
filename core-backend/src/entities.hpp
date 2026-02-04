@@ -107,6 +107,20 @@ CREATE TABLE IF NOT EXISTS sync_state (
     PRIMARY KEY (source, entity)
 ))";
 
+// Entity Stats Meta 表（存储历史统计信息）
+inline const char *ENTITY_STATS_META_DDL = R"(
+CREATE TABLE IF NOT EXISTS entity_stats_meta (
+    source VARCHAR NOT NULL,
+    entity VARCHAR NOT NULL,
+    total_requests BIGINT DEFAULT 0,
+    success_requests BIGINT DEFAULT 0,
+    total_rows_synced BIGINT DEFAULT 0,
+    total_api_time_ms BIGINT DEFAULT 0,
+    success_rate DOUBLE DEFAULT 100.0,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (source, entity)
+))";
+
 // ============================================================================
 // Entity 定义结构
 // ============================================================================

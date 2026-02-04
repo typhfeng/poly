@@ -3,10 +3,10 @@
 // ============================================================================
 // 宏配置
 // ============================================================================
-#define PARALLEL_PER_SOURCE 4   // 每个 source 内最多并行 entity 数
-#define PARALLEL_TOTAL 16       // 全局最大并发请求数
-#define GRAPHQL_BATCH_SIZE 1000 // 每次请求的 limit
-#define DB_FLUSH_THRESHOLD 5000 // 累积多少条刷入 DB
+#define PARALLEL_PER_SOURCE 9999 // 每个 source 内最多并行 entity 数
+#define PARALLEL_TOTAL 9999      // 全局最大并发请求数
+#define GRAPHQL_BATCH_SIZE 1000  // 每次请求的 limit
+#define DB_FLUSH_THRESHOLD 5000  // 累积多少条刷入 DB
 
 #include <algorithm>
 #include <cassert>
@@ -188,6 +188,9 @@ public:
       : config_(config), db_(db), pool_(pool) {
     db_.init_sync_state();
 
+    // 设置数据库连接到EntityStatsManager
+    EntityStatsManager::instance().set_database(&db_);
+
     // 预分配空间，避免向量重新分配导致 scheduler_ 指针失效
     schedulers_.reserve(config.sources.size());
     for (const auto &src : config.sources) {
@@ -258,7 +261,12 @@ inline void EntityPuller::send_request() {
 
   request_start_ = std::chrono::steady_clock::now();
 
+  // 设置API状态为CALLING
+  EntityStatsManager::instance().set_api_state(source_name_, entity_->name, ApiState::CALLING);
+
   pool_.async_post(target_, query, [this](std::string body) {
+    // 设置API状态为PROCESSING
+    EntityStatsManager::instance().set_api_state(source_name_, entity_->name, ApiState::PROCESSING);
     on_response(body);
   });
 }
@@ -287,7 +295,7 @@ inline void EntityPuller::on_response(const std::string &body) {
   if (body.empty()) {
     stats.record_failure(source_name_, entity_->name, latency_ms);
     std::cerr << "[Pull] " << entity_->name << " 请求失败，5秒后重试" << std::endl;
-    // 延迟重试
+    // 延迟重试（backoff期间设置为PROCESSING状态）
     pool_.schedule_retry([this]() { send_request(); }, 5000);
     return;
   }
