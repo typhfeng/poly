@@ -126,8 +126,10 @@ private:
     // 从 entities 定义动态获取表名
     auto collect_stats = [&](const entities::EntityDef *const *list, size_t count) {
       for (size_t i = 0; i < count; ++i) {
-        const char *table = list[i]->table;
-        stats[table] = db_.get_table_count(table);
+        const auto *e = list[i];
+        assert(e != nullptr);
+        // 极限优化：不做 COUNT(*) 扫表，直接复用 puller 维护的内存计数（跨 source 汇总）
+        stats[e->table] = EntityStatsManager::instance().get_total_count_for_entity(e->name);
       }
     };
     collect_stats(entities::MAIN_ENTITIES, entities::MAIN_ENTITY_COUNT);
@@ -155,7 +157,7 @@ private:
   void handle_entity_stats() {
     res_.set(http::field::content_type, "application/json");
     res_.result(http::status::ok);
-    res_.body() = EntityStatsManager::instance().get_all().dump();
+    res_.body() = EntityStatsManager::instance().get_all_dump();
   }
 
   void do_write() {

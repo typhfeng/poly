@@ -114,6 +114,10 @@ CREATE TABLE IF NOT EXISTS entity_stats_meta (
     entity VARCHAR NOT NULL,
     total_requests BIGINT DEFAULT 0,
     success_requests BIGINT DEFAULT 0,
+    fail_network BIGINT DEFAULT 0,
+    fail_json BIGINT DEFAULT 0,
+    fail_graphql BIGINT DEFAULT 0,
+    fail_format BIGINT DEFAULT 0,
     total_rows_synced BIGINT DEFAULT 0,
     total_api_time_ms BIGINT DEFAULT 0,
     success_rate DOUBLE DEFAULT 100.0,
@@ -147,10 +151,7 @@ inline int64_t estimate_row_size_bytes(const EntityDef *e) {
 
   auto lp = ddl.find('(');
   auto rp = ddl.find(')', lp == std::string::npos ? 0 : lp + 1);
-  if (lp == std::string::npos || rp == std::string::npos || rp <= lp) {
-    // DDL 解析失败就给一个保守默认值，避免 UI 为空
-    return 64;
-  }
+  assert(lp != std::string::npos && rp != std::string::npos && rp > lp);
 
   std::string cols = ddl.substr(lp + 1, rp - lp - 1);
 
@@ -170,6 +171,64 @@ inline int64_t estimate_row_size_bytes(const EntityDef *e) {
     return s;
   };
 
+  auto type_token = [&](const std::string &line, std::string *out_col) -> std::string {
+    // col_name TYPE ...
+    size_t sp1 = line.find_first_of(" \t");
+    if (sp1 == std::string::npos)
+      return "";
+    std::string col = trim(line.substr(0, sp1));
+    size_t sp2 = line.find_first_not_of(" \t", sp1);
+    if (sp2 == std::string::npos)
+      return "";
+    size_t sp3 = line.find_first_of(" \t", sp2);
+    std::string type = (sp3 == std::string::npos) ? line.substr(sp2) : line.substr(sp2, sp3 - sp2);
+    type = upper(trim(type));
+    // 去掉 VARCHAR(…) / DECIMAL(…)
+    auto p = type.find('(');
+    if (p != std::string::npos)
+      type = type.substr(0, p);
+    if (out_col)
+      *out_col = upper(col);
+    return type;
+  };
+
+  auto varchar_guess = [&](const std::string &col_upper) -> int64_t {
+    // 纯展示估算：做成小而稳定的规则，避免 entity 级 if/else
+    if (col_upper == "ID" || col_upper.ends_with("_ID"))
+      return 66; // 常见：hex/hash/id
+    if (col_upper.find("HASH") != std::string::npos)
+      return 66;
+    if (col_upper.find("ADDR") != std::string::npos || col_upper.find("ADDRESS") != std::string::npos)
+      return 42;
+    return 32;
+  };
+
+  auto fixed_size = [&](const std::string &type_upper, const std::string &col_upper) -> int64_t {
+    // 常见 duckdb 类型的展示尺寸（不是物理存储）
+    struct Pair {
+      const char *t;
+      int64_t sz;
+    };
+    static constexpr Pair kFixed[] = {
+        {"INT", 4},
+        {"INTEGER", 4},
+        {"BIGINT", 8},
+        {"DOUBLE", 8},
+        {"FLOAT", 8},
+        {"BOOLEAN", 1},
+        {"BOOL", 1},
+        {"TIMESTAMP", 8},
+    };
+    for (const auto &p : kFixed) {
+      if (type_upper == p.t)
+        return p.sz;
+    }
+    if (type_upper == "VARCHAR" || type_upper == "TEXT" || type_upper == "STRING")
+      return varchar_guess(col_upper);
+    // 兜底：给一个中等值，避免 0
+    return 16;
+  };
+
   int64_t total = 8; // 轻微固定开销
   size_t pos = 0;
   while (pos < cols.size()) {
@@ -186,29 +245,11 @@ inline int64_t estimate_row_size_bytes(const EntityDef *e) {
     if (u.starts_with("PRIMARY KEY") || u.starts_with("UNIQUE") || u.starts_with("CONSTRAINT"))
       continue;
 
-    // 取第 2 个 token 作为类型（col_name TYPE ...）
-    size_t sp1 = line.find_first_of(" \t");
-    if (sp1 == std::string::npos)
+    std::string col_upper;
+    std::string type = type_token(line, &col_upper);
+    if (type.empty())
       continue;
-    size_t sp2 = line.find_first_not_of(" \t", sp1);
-    if (sp2 == std::string::npos)
-      continue;
-    size_t sp3 = line.find_first_of(" \t", sp2);
-    std::string type = (sp3 == std::string::npos) ? line.substr(sp2) : line.substr(sp2, sp3 - sp2);
-    type = upper(trim(type));
-
-    if (type == "INT" || type == "INTEGER")
-      total += 4;
-    else if (type == "BIGINT")
-      total += 8;
-    else if (type == "DOUBLE" || type == "FLOAT")
-      total += 8;
-    else if (type == "BOOLEAN" || type == "BOOL")
-      total += 1;
-    else if (type == "VARCHAR" || type == "TEXT" || type == "STRING")
-      total += 32;
-    else
-      total += 16;
+    total += fixed_size(type, col_upper);
   }
 
   if (total < 16)

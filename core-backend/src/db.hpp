@@ -2,9 +2,11 @@
 
 #include "entities.hpp"
 #include <cassert>
+#include <chrono>
 #include <duckdb.hpp>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 using json = nlohmann::json;
@@ -43,16 +45,15 @@ public:
     return get_sync_field<int64_t>(source, entity, "total_synced", 0);
   }
 
-  void save_cursor(const std::string &source, const std::string &entity,
-                   const std::string &last_id, int64_t batch_count) {
-    int64_t total = get_total_synced(source, entity) + batch_count;
+  void save_cursor_total(const std::string &source, const std::string &entity,
+                         const std::string &last_id, int64_t total_synced) {
     std::string sql =
         "INSERT OR REPLACE INTO sync_state (source, entity, last_id, last_sync_at, total_synced) "
         "VALUES (" +
         entities::escape_sql(source) + ", " +
         entities::escape_sql(entity) + ", " +
         entities::escape_sql(last_id) + ", CURRENT_TIMESTAMP, " +
-        std::to_string(total) + ")";
+        std::to_string(total_synced) + ")";
     auto result = conn_->Query(sql);
     assert(!result->HasError() && "save_cursor failed");
   }
@@ -92,13 +93,31 @@ public:
     assert(!result->HasError() && "batch_insert failed");
   }
 
+  // sync_state 按时间节流，允许丢最近几秒
   void atomic_insert_and_save_cursor(
       const std::string &table, const std::string &columns,
       const std::vector<std::string> &values_list,
-      const std::string &source, const std::string &entity, const std::string &cursor) {
+      const std::string &source, const std::string &entity, const std::string &cursor,
+      bool force_save_cursor = false) {
+    auto &m = cursor_meta_[source + "/" + entity];
+    if (!m.inited) {
+      m.total_synced = get_total_synced(source, entity);
+      m.inited = true;
+      m.last_save = std::chrono::steady_clock::now();
+    }
+
+    m.total_synced += static_cast<int64_t>(values_list.size());
+    if (!cursor.empty())
+      m.last_cursor = cursor;
+
     begin_transaction();
     batch_insert(table, columns, values_list);
-    save_cursor(source, entity, cursor, values_list.size());
+
+    auto now = std::chrono::steady_clock::now();
+    if (force_save_cursor || (now - m.last_save) >= kCursorPersistInterval) {
+      save_cursor_total(source, entity, m.last_cursor, m.total_synced);
+      m.last_save = now;
+    }
     commit();
   }
 
@@ -165,4 +184,13 @@ private:
   std::unique_ptr<duckdb::DuckDB> db_;
   std::unique_ptr<duckdb::Connection> conn_;      // 写连接
   std::unique_ptr<duckdb::Connection> read_conn_; // 读连接
+
+  struct CursorMeta {
+    bool inited = false;
+    int64_t total_synced = 0;
+    std::string last_cursor;
+    std::chrono::steady_clock::time_point last_save{};
+  };
+  std::unordered_map<std::string, CursorMeta> cursor_meta_;
+  static constexpr auto kCursorPersistInterval = std::chrono::seconds(5);
 };

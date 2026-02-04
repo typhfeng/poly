@@ -140,10 +140,10 @@ async def fetch_chain_block(client: httpx.AsyncClient, network: str, cache: dict
     return None
 
 
-async def fetch_local_stats(client: httpx.AsyncClient) -> dict:
-    """获取本地数据库中每个表的记录数"""
+async def fetch_entity_stats(client: httpx.AsyncClient) -> dict:
+    """获取后端 entity 实时统计（包含 count）"""
     try:
-        resp = await client.get(f"{BACKEND_API}/api/stats", timeout=5)
+        resp = await client.get(f"{BACKEND_API}/api/entity-stats", timeout=5)
         if resp.status_code == 200:
             return resp.json()
     except:
@@ -267,11 +267,11 @@ async def get_graph_status_stream() -> AsyncGenerator[dict, None]:
     
     result = {"sources": {}}
     chain_block_cache = {}
-    local_stats = {}
+    backend_entity_stats = {}
     
     async with httpx.AsyncClient() as client:
-        # Step 0: 获取本地数据库 stats
-        local_stats = await fetch_local_stats(client)
+        # Step 0: 获取后端 entity stats（避免触发后端 COUNT(*)）
+        backend_entity_stats = await fetch_entity_stats(client)
         # Step 1: 并发查询所有 subgraph 的 meta
         yield {"type": "status", "msg": f"查询 {total} 个 subgraph meta..."}
         
@@ -360,14 +360,12 @@ async def get_graph_status_stream() -> AsyncGenerator[dict, None]:
             indexed_block = meta.get("block", {}).get("number", 0) if not meta.get("error") else 0
             avg_progress = compute_node_stats(contract_nodes, indexed_block, chain_block_cache)
             
-            # 计算每个 configured entity 的本地记录数
+            # 计算每个 configured entity 的本地记录数（按 source/entity）
             entity_stats = {}
             for entity in configured_entities:
-                table = entity_table_map.get(entity, "")
-                if table and table in local_stats:
-                    entity_stats[entity] = local_stats[table]
-                else:
-                    entity_stats[entity] = 0
+                key = f"{name}/{entity}"
+                stat = backend_entity_stats.get(key, {})
+                entity_stats[entity] = stat.get("count", 0) if isinstance(stat, dict) else 0
             
             result["sources"][name] = {
                 "source_name": name,  # 用于前端构建 entity stats key

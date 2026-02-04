@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <deque>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -23,6 +24,16 @@ enum class ApiState {
 };
 
 // ============================================================================
+// 失败分类（用于 hover 展示）
+// ============================================================================
+enum class FailureKind : uint8_t {
+  NETWORK = 0, // body empty / 网络错误
+  JSON = 1,    // JSON parse 失败
+  GRAPHQL = 2, // 响应包含 errors
+  FORMAT = 3,  // 响应结构不符合预期
+};
+
+// ============================================================================
 // 单个 Entity 的实时统计
 // ============================================================================
 struct EntityStat {
@@ -31,7 +42,6 @@ struct EntityStat {
 
   // 记录数（从 DB 初始化，之后累加）
   int64_t count = 0;
-  int64_t initial_count = 0; // 同步开始时的初始count
 
   // 估算：单条记录的"结构体大小"(字节)，用于展示 DB 规模
   int64_t row_size_bytes = 0;
@@ -45,12 +55,19 @@ struct EntityStat {
   double success_rate = 100.0;          // 持久化到DB
   int64_t total_requests = 0;           // 历史总请求数（持久化）
   int64_t success_requests = 0;         // 历史成功请求数（持久化）
+  int64_t fail_network = 0;             // 失败分类计数（持久化）
+  int64_t fail_json = 0;
+  int64_t fail_graphql = 0;
+  int64_t fail_format = 0;
 
   // 状态
   bool is_syncing = false;
   bool sync_done = false;
   ApiState api_state = ApiState::IDLE;
   std::chrono::steady_clock::time_point last_update;
+
+  // 节流持久化：允许丢最近几秒的 meta，但长期准确
+  std::chrono::steady_clock::time_point last_persist;
 };
 
 // ============================================================================
@@ -68,6 +85,24 @@ public:
     db_ = db;
   }
 
+  // 获取指定 entity（跨 source 汇总）的 count
+  // found=true 表示至少存在一个 source/entity 的统计项（即已经 init 过）
+  int64_t get_total_count_for_entity(const std::string &entity, bool *found = nullptr) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    int64_t sum = 0;
+    bool any = false;
+    for (auto &[key, stat] : stats_) {
+      (void)key;
+      if (stat.entity == entity) {
+        sum += stat.count;
+        any = true;
+      }
+    }
+    if (found)
+      *found = any;
+    return sum;
+  }
+
   // 初始化 entity（设置初始 count，并从DB加载历史统计）
   void init(const std::string &source, const std::string &entity, int64_t count, int64_t row_size_bytes) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -76,9 +111,9 @@ public:
     stat.source = source;
     stat.entity = entity;
     stat.count = count;
-    stat.initial_count = count;
     stat.row_size_bytes = row_size_bytes;
     stat.last_update = std::chrono::steady_clock::now();
+    stat.last_persist = stat.last_update;
 
     // 从数据库加载历史统计
     load_from_db(stat);
@@ -91,7 +126,6 @@ public:
     auto &stat = stats_[key];
     stat.is_syncing = true;
     stat.sync_done = false;
-    stat.initial_count = stat.count;
     stat.api_state = ApiState::IDLE;
   }
 
@@ -100,10 +134,12 @@ public:
     std::lock_guard<std::mutex> lock(mutex_);
     auto key = make_key(source, entity);
     if (stats_.count(key)) {
-      stats_[key].is_syncing = false;
-      stats_[key].sync_done = true;
-      stats_[key].api_state = ApiState::IDLE;
-      save_to_db(stats_[key]); // 保存到数据库
+      auto &stat = stats_[key];
+      stat.is_syncing = false;
+      stat.sync_done = true;
+      stat.api_state = ApiState::IDLE;
+      save_to_db(stat); // 结束时强制落盘
+      stat.last_persist = std::chrono::steady_clock::now();
     }
   }
 
@@ -139,14 +175,16 @@ public:
     // 更新成功率
     stat.success_rate = static_cast<double>(stat.success_requests) / stat.total_requests * 100.0;
 
-    // 每10次请求保存一次到数据库
-    if (stat.total_requests % 10 == 0) {
+    // 节流：每隔一小段时间落盘一次，允许丢最近几秒
+    auto now = std::chrono::steady_clock::now();
+    if ((now - stat.last_persist) >= kPersistInterval) {
       save_to_db(stat);
+      stat.last_persist = now;
     }
   }
 
   // 记录失败的请求（latency_ms是纯API调用时间，不含本地处理）
-  void record_failure(const std::string &source, const std::string &entity, int64_t latency_ms) {
+  void record_failure(const std::string &source, const std::string &entity, FailureKind kind, int64_t latency_ms) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto key = make_key(source, entity);
     auto &stat = stats_[key];
@@ -154,6 +192,17 @@ public:
     stat.total_requests++;
     stat.total_api_time_ms += latency_ms; // 累加API调用时间
     stat.last_update = std::chrono::steady_clock::now();
+
+    if (kind == FailureKind::NETWORK)
+      ++stat.fail_network;
+    else if (kind == FailureKind::JSON)
+      ++stat.fail_json;
+    else if (kind == FailureKind::GRAPHQL)
+      ++stat.fail_graphql;
+    else if (kind == FailureKind::FORMAT)
+      ++stat.fail_format;
+    else
+      assert(false && "Unknown FailureKind");
 
     // 记录最近20个延时（不持久化）
     stat.recent_latencies.push_back(latency_ms);
@@ -164,15 +213,33 @@ public:
     // 更新成功率
     stat.success_rate = static_cast<double>(stat.success_requests) / stat.total_requests * 100.0;
 
-    // 每10次请求保存一次到数据库
-    if (stat.total_requests % 10 == 0) {
+    // 节流：每隔一小段时间落盘一次，允许丢最近几秒
+    auto now = std::chrono::steady_clock::now();
+    if ((now - stat.last_persist) >= kPersistInterval) {
       save_to_db(stat);
+      stat.last_persist = now;
     }
   }
 
-  // 获取所有统计（JSON 格式）
-  json get_all() {
+  // 获取所有统计（JSON dump 字符串；用于 HTTP 直接返回，避免重复序列化）
+  const std::string &get_all_dump() {
     std::lock_guard<std::mutex> lock(mutex_);
+    rebuild_cache_if_needed_unsafe();
+    return cached_dump_;
+  }
+
+private:
+  EntityStatsManager() = default;
+
+  std::string make_key(const std::string &source, const std::string &entity) {
+    return source + "/" + entity;
+  }
+
+  void rebuild_cache_if_needed_unsafe() {
+    auto now = std::chrono::steady_clock::now();
+    if (!cached_dump_.empty() && (now - cached_at_) < kCacheTtl)
+      return;
+
     json result = json::object();
 
     for (auto &[key, stat] : stats_) {
@@ -210,22 +277,21 @@ public:
           {"speed", std::round(speed * 10) / 10},
           {"avg_latency_ms", std::round(avg_latency)},
           {"success_rate", std::round(stat.success_rate * 10) / 10},
+          {"success_requests", stat.success_requests},
+          {"total_requests", stat.total_requests},
+          {"fail_network", stat.fail_network},
+          {"fail_json", stat.fail_json},
+          {"fail_graphql", stat.fail_graphql},
+          {"fail_format", stat.fail_format},
           {"is_syncing", stat.is_syncing},
           {"sync_done", stat.sync_done},
-          {"total_requests", stat.total_requests},
           {"total_rows_synced", stat.total_rows_synced},
           {"api_state", api_state_str},
       };
     }
 
-    return result;
-  }
-
-private:
-  EntityStatsManager() = default;
-
-  std::string make_key(const std::string &source, const std::string &entity) {
-    return source + "/" + entity;
+    cached_dump_ = result.dump();
+    cached_at_ = now;
   }
 
   // 从数据库加载历史统计
@@ -237,6 +303,14 @@ private:
   std::mutex mutex_;
   std::unordered_map<std::string, EntityStat> stats_;
   Database *db_ = nullptr;
+
+  // 缓存（避免频繁构建/序列化）
+  static constexpr auto kCacheTtl = std::chrono::milliseconds(200);
+  std::chrono::steady_clock::time_point cached_at_{};
+  std::string cached_dump_;
+
+  // meta 落盘节流
+  static constexpr auto kPersistInterval = std::chrono::seconds(5);
 };
 
 // ============================================================================
@@ -250,25 +324,25 @@ inline void EntityStatsManager::load_from_db(EntityStat &stat) {
   if (!db_)
     return;
 
-  try {
-    std::string sql =
-        "SELECT total_requests, success_requests, total_rows_synced, total_api_time_ms, success_rate "
-        "FROM entity_stats_meta "
-        "WHERE source = " +
-        entities::escape_sql(stat.source) +
-        " AND entity = " + entities::escape_sql(stat.entity);
-    auto result = db_->query_json(sql);
+  std::string sql =
+      "SELECT total_requests, success_requests, fail_network, fail_json, fail_graphql, fail_format, total_rows_synced, total_api_time_ms, success_rate "
+      "FROM entity_stats_meta "
+      "WHERE source = " +
+      entities::escape_sql(stat.source) +
+      " AND entity = " + entities::escape_sql(stat.entity);
+  auto result = db_->query_json(sql);
 
-    if (!result.empty()) {
-      auto &row = result[0];
-      stat.total_requests = row["total_requests"].get<int64_t>();
-      stat.success_requests = row["success_requests"].get<int64_t>();
-      stat.total_rows_synced = row["total_rows_synced"].get<int64_t>();
-      stat.total_api_time_ms = row["total_api_time_ms"].get<int64_t>();
-      stat.success_rate = row["success_rate"].get<double>();
-    }
-  } catch (...) {
-    // 忽略错误
+  if (!result.empty()) {
+    auto &row = result[0];
+    stat.total_requests = row["total_requests"].get<int64_t>();
+    stat.success_requests = row["success_requests"].get<int64_t>();
+    stat.fail_network = row["fail_network"].get<int64_t>();
+    stat.fail_json = row["fail_json"].get<int64_t>();
+    stat.fail_graphql = row["fail_graphql"].get<int64_t>();
+    stat.fail_format = row["fail_format"].get<int64_t>();
+    stat.total_rows_synced = row["total_rows_synced"].get<int64_t>();
+    stat.total_api_time_ms = row["total_api_time_ms"].get<int64_t>();
+    stat.success_rate = row["success_rate"].get<double>();
   }
 }
 
@@ -276,20 +350,20 @@ inline void EntityStatsManager::save_to_db(const EntityStat &stat) {
   if (!db_)
     return;
 
-  try {
-    std::string sql =
-        "INSERT OR REPLACE INTO entity_stats_meta "
-        "(source, entity, total_requests, success_requests, total_rows_synced, total_api_time_ms, success_rate, updated_at) "
-        "VALUES (" +
-        entities::escape_sql(stat.source) + ", " +
-        entities::escape_sql(stat.entity) + ", " +
-        std::to_string(stat.total_requests) + ", " +
-        std::to_string(stat.success_requests) + ", " +
-        std::to_string(stat.total_rows_synced) + ", " +
-        std::to_string(stat.total_api_time_ms) + ", " +
-        std::to_string(stat.success_rate) + ", CURRENT_TIMESTAMP)";
-    db_->execute(sql);
-  } catch (...) {
-    // 忽略错误
-  }
+  std::string sql =
+      "INSERT OR REPLACE INTO entity_stats_meta "
+      "(source, entity, total_requests, success_requests, fail_network, fail_json, fail_graphql, fail_format, total_rows_synced, total_api_time_ms, success_rate, updated_at) "
+      "VALUES (" +
+      entities::escape_sql(stat.source) + ", " +
+      entities::escape_sql(stat.entity) + ", " +
+      std::to_string(stat.total_requests) + ", " +
+      std::to_string(stat.success_requests) + ", " +
+      std::to_string(stat.fail_network) + ", " +
+      std::to_string(stat.fail_json) + ", " +
+      std::to_string(stat.fail_graphql) + ", " +
+      std::to_string(stat.fail_format) + ", " +
+      std::to_string(stat.total_rows_synced) + ", " +
+      std::to_string(stat.total_api_time_ms) + ", " +
+      std::to_string(stat.success_rate) + ", CURRENT_TIMESTAMP)";
+  db_->execute(sql);
 }

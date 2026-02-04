@@ -564,6 +564,19 @@
         successEl.textContent = rate.toFixed(1);
         successEl.parentElement.className =
           rate > 95 ? "good" : rate > 80 ? "warn" : "bad";
+
+        const succ = stat.success_requests ?? 0;
+        const tot = stat.total_requests ?? 0;
+        const countsEl = row.querySelector('[data-field="success_counts"]');
+        if (countsEl) countsEl.textContent = ` (${succ}/${tot})`;
+
+        const fNet = stat.fail_network ?? 0;
+        const fJson = stat.fail_json ?? 0;
+        const fGql = stat.fail_graphql ?? 0;
+        const fFmt = stat.fail_format ?? 0;
+        successEl.parentElement.title =
+          `成功率 ${rate.toFixed(1)}% (${succ}/${tot})\n` +
+          `失败分类：网络 ${fNet}，JSON ${fJson}，GraphQL ${fGql}，格式 ${fFmt}`;
       }
 
       // 更新 size (MB)
@@ -791,7 +804,7 @@
                         <span class="qos">
                             <span title="速度"><span data-field="speed">-</span>/s</span>
                             <span title="延时"><span data-field="latency">-</span>ms</span>
-                            <span title="成功率"><span data-field="success">-</span>%</span>
+                            <span title="成功率"><span data-field="success">-</span>%<span data-field="success_counts"></span></span>
                         </span>
                     </div>`,
                       )
