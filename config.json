@@ -7,31 +7,31 @@
     "Polymarket": {
       "subgraph_id": "81Dm16JjuFSrqz813HysXoUPvzTwE7fsfPk2RTf66nyC",
       "enabled": true,
-      "entities": [
-        "Condition",
-        "Split",
-        "Merge",
-        "Redemption",
-        "Account",
-        "EnrichedOrderFilled",
-        "Orderbook",
-        "MarketData",
-        "MarketPosition",
-        "MarketProfit",
-        "FixedProductMarketMaker",
-        "Transaction",
-        "Global"
-      ]
+      "entities": {
+        "Condition": "condition",
+        "Split": "split",
+        "Merge": "merge",
+        "Redemption": "redemption",
+        "Account": "account",
+        "EnrichedOrderFilled": "enriched_order_filled",
+        "Orderbook": "orderbook",
+        "MarketData": "market_data",
+        "MarketPosition": "market_position",
+        "MarketProfit": "market_profit",
+        "FixedProductMarketMaker": "fpmm",
+        "Transaction": "fpmm_transaction",
+        "Global": "global"
+      }
     },
     "Polymarket Profit and Loss": {
       "subgraph_id": "6c58N5U4MtQE2Y8njfVrrAfRykzfqajMGeTMEvMmskVz",
       "enabled": true,
-      "entities": [
-        "UserPosition",
-        "Condition",
-        "NegRiskEvent",
-        "FPMM"
-      ]
+      "entities": {
+        "UserPosition": "user_position",
+        "Condition": "pnl_condition",
+        "NegRiskEvent": "neg_risk_event",
+        "FPMM": "pnl_fpmm"
+      }
     }
   }
 }

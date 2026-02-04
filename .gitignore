@@ -10,3 +10,6 @@ data/*.duckdb.wal
 
 # Python
 __pycache__/
+
+# language server
+.cache/

@@ -1,0 +1,8 @@
+[
+{
+  "directory": "/home/chuyin/work/poly/core-backend/projects/core/build",
+  "command": "clang++  -I/home/chuyin/work/poly/core-backend/projects/core/../../src -I/home/chuyin/work/poly/core-backend/projects/core/../../packages/duckdb -I/home/chuyin/work/poly/core-backend/projects/core/../../include -I/home/chuyin/work/poly/core-backend/projects/core/../../include/package -std=gnu++23 -o CMakeFiles/core.dir/home/chuyin/work/poly/core-backend/src/main.cpp.o -c /home/chuyin/work/poly/core-backend/src/main.cpp",
+  "file": "/home/chuyin/work/poly/core-backend/src/main.cpp",
+  "output": "CMakeFiles/core.dir/home/chuyin/work/poly/core-backend/src/main.cpp.o"
+}
+]

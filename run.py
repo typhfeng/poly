@@ -60,17 +60,7 @@ def build_backend():
 
 def check_config():
     """检查配置文件"""
-    example_file = ROOT / "config.json"
-    
-    if not CONFIG_FILE.exists():
-        if example_file.exists():
-            import shutil
-            shutil.copy(example_file, CONFIG_FILE)
-            print(f"[run.py] 已创建 config.json")
-        else:
-            print(f"[run.py] 错误: 配置文件 {CONFIG_FILE} 不存在")
-            print("[run.py] 请创建 config.json 并填入 API_KEY")
-            sys.exit(1)
+    assert CONFIG_FILE.exists(), f"配置文件 {CONFIG_FILE} 不存在，请创建并填入 API_KEY"
     
     import json
     with open(CONFIG_FILE) as f:

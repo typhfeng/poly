@@ -45,6 +45,15 @@ target_include_directories(core PRIVATE
     ${INCLUDE_DIR}/package
 )
 
+# clangd: copy compile_commands.json to repo root after each build
+get_filename_component(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
+add_custom_command(TARGET core POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_BINARY_DIR}/compile_commands.json"
+        "${REPO_ROOT}/compile_commands.json"
+    VERBATIM
+)
+
 # 链接库
 if(WIN32)
     target_link_libraries(core PRIVATE

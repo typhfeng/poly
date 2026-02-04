@@ -156,39 +156,6 @@
         
         <div class="grid">
             <div class="card">
-                <h2>数据统计</h2>
-                <div class="stats-grid">
-                    {% for table, count in stats.items() %}
-                    <div class="stat-item">
-                        <div class="label">{{ table }}</div>
-                        <div class="value">{{ "{:,}".format(count) if count is number else count }}</div>
-                    </div>
-                    {% endfor %}
-                </div>
-            </div>
-            
-            <div class="card">
-                <h2>同步状态</h2>
-                {% if sync_state %}
-                <table class="sync-table">
-                    <tr><th>Source</th><th>Entity</th><th>已同步</th><th>最后同步</th></tr>
-                    {% for row in sync_state[:10] %}
-                    <tr>
-                        <td>{{ row[0] }}</td>
-                        <td>{{ row[1] }}</td>
-                        <td>{{ "{:,}".format(row[4]) if row[4] else 0 }}</td>
-                        <td>{{ row[3] }}</td>
-                    </tr>
-                    {% endfor %}
-                </table>
-                {% else %}
-                <p style="color: #888;">暂无同步记录</p>
-                {% endif %}
-            </div>
-        </div>
-        
-        <div class="grid">
-            <div class="card">
                 <h2>用户持仓查询</h2>
                 <div class="search-box">
                     <label>用户地址</label>

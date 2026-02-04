@@ -57,11 +57,23 @@
 .ds-progress.behind { background: #854d0e; color: #fde047; }
 .ds-progress.error { background: #991b1b; color: #fca5a5; }
 .ds-addr { font-family: monospace; font-size: 0.7em; color: #666; margin-top: 4px; }
-.ds-entities { font-size: 0.7em; color: #666; margin-top: 4px; }
-.ds-entities span { background: #333; padding: 1px 4px; border-radius: 2px; margin-right: 3px; }
-.ds-entities-label { color: #888; margin-right: 4px; background: none !important; }
-.ds-output-entities { font-size: 0.75em; color: #666; margin-top: 8px; padding-top: 8px; border-top: 1px solid #333; }
-.ds-output-entities span { background: #2d4a2d; color: #4ade80; padding: 1px 4px; border-radius: 2px; margin-right: 3px; }
+.ds-entities { font-size: 0.7em; color: #666; margin-top: 6px; }
+.ds-entities-gray { display: flex; flex-wrap: wrap; gap: 3px; margin-bottom: 4px; }
+.ds-entities-gray span { background: #333; padding: 1px 4px; border-radius: 2px; }
+.ds-entity-row { display: flex; align-items: center; padding: 3px 6px; background: #1e2e1e; border-radius: 3px; margin-bottom: 2px; color: #4ade80; font-family: monospace; font-size: 0.8em; }
+.ds-entity-row .name { font-weight: 500; width: 180px; flex-shrink: 0; }
+.ds-entity-row .stat { color: #86efac; width: 90px; text-align: right; flex-shrink: 0; }
+.ds-entity-row .stat.syncing { color: #fbbf24; }
+.ds-entity-row .stat.error { color: #f87171; }
+.ds-entity-row .size { color: #888; width: 70px; text-align: right; flex-shrink: 0; }
+.ds-entity-row .sync-status { width: 60px; text-align: center; flex-shrink: 0; }
+.ds-entity-row .sync-status.done { color: #4ade80; }
+.ds-entity-row .sync-status.syncing { color: #fbbf24; }
+.ds-entity-row .qos { display: flex; gap: 6px; color: #6b7280; margin-left: auto; }
+.ds-entity-row .qos span { display: flex; align-items: center; gap: 2px; width: 70px; justify-content: flex-end; }
+.ds-entity-row .qos .good { color: #4ade80; }
+.ds-entity-row .qos .warn { color: #fbbf24; }
+.ds-entity-row .qos .bad { color: #f87171; }
 
 .expand-icon { color: #666; font-size: 0.8em; transition: transform 0.2s; }
 .graph-source.expanded .expand-icon { transform: rotate(180deg); }
@@ -87,6 +99,9 @@
 </div>
 
 <script>
+window._graphData = null;
+let _entityStatsTimer = null;
+
 function toggleSource(el) {
     if (event.target.closest('.btn-sm')) return;
     el.classList.toggle('expanded');
@@ -117,7 +132,9 @@ function refreshGraphStatus() {
             if (data.data.error) {
                 container.innerHTML = `<div class="error-msg">${data.data.error}</div>`;
             } else {
+                window._graphData = data.data;
                 container.innerHTML = renderGraphSources(data.data);
+                startEntityStatsPolling();
             }
         }
     };
@@ -128,6 +145,116 @@ function refreshGraphStatus() {
         btn.disabled = false;
         btn.textContent = '刷新';
     };
+}
+
+// 自动轮询 entity stats（高效，只更新 DOM 中的数字）
+function startEntityStatsPolling() {
+    if (_entityStatsTimer) clearInterval(_entityStatsTimer);
+    
+    async function pollStats() {
+        try {
+            const resp = await fetch('/api/entity-stats');
+            if (!resp.ok) return;
+            const stats = await resp.json();
+            updateEntityStatsUI(stats);
+        } catch (e) {}
+    }
+    
+    pollStats();
+    _entityStatsTimer = setInterval(pollStats, 2000);
+}
+
+function updateEntityStatsUI(stats) {
+    const sourceSyncMap = new Map(); // source -> needsSyncing
+    
+    document.querySelectorAll('.ds-entity-row').forEach(row => {
+        const source = row.dataset.source;
+        const entity = row.dataset.entity;
+        const key = `${source}/${entity}`;
+        const stat = stats[key];
+        
+        if (!stat) {
+            // 没拿到 stat 就按未完成处理
+            row.dataset.done = '0';
+            row.dataset.syncing = '0';
+            sourceSyncMap.set(source, true);
+            return;
+        }
+        
+        // 更新 count
+        const countEl = row.querySelector('[data-field="count"]');
+        if (countEl) {
+            countEl.textContent = stat.count?.toLocaleString() || '0';
+            countEl.classList.toggle('syncing', stat.is_syncing);
+        }
+        
+        // 更新 speed
+        const speedEl = row.querySelector('[data-field="speed"]');
+        if (speedEl) {
+            speedEl.textContent = stat.speed?.toFixed(1) || '0';
+        }
+        
+        // 更新 latency
+        const latencyEl = row.querySelector('[data-field="latency"]');
+        if (latencyEl) {
+            const latency = stat.avg_latency_ms || 0;
+            latencyEl.textContent = Math.round(latency);
+            latencyEl.parentElement.className = latency < 500 ? 'good' : (latency < 2000 ? 'warn' : 'bad');
+        }
+        
+        // 更新 success rate
+        const successEl = row.querySelector('[data-field="success"]');
+        if (successEl) {
+            const rate = stat.success_rate || 0;
+            successEl.textContent = rate.toFixed(1);
+            successEl.parentElement.className = rate > 95 ? 'good' : (rate > 80 ? 'warn' : 'bad');
+        }
+        
+        // 更新 size (MB)
+        const sizeEl = row.querySelector('[data-field="size_mb"]');
+        if (sizeEl) {
+            const mb = stat.db_size_mb || 0;
+            sizeEl.textContent = mb.toFixed(2);
+        }
+        
+        // 更新 sync 状态
+        const syncEl = row.querySelector('[data-field="sync"]');
+        if (syncEl) {
+            let text = 'PEND';
+            let cls = '';
+            if (stat.is_syncing) { text = 'SYNC'; cls = 'syncing'; }
+            else if (stat.sync_done) { text = 'DONE'; cls = 'done'; }
+            syncEl.textContent = text;
+            syncEl.className = `sync-status ${cls}`.trim();
+        }
+        
+        row.dataset.done = stat.sync_done ? '1' : '0';
+        row.dataset.syncing = stat.is_syncing ? '1' : '0';
+        
+        const needsSyncing = stat.is_syncing || !stat.sync_done;
+        sourceSyncMap.set(source, (sourceSyncMap.get(source) || false) || needsSyncing);
+    });
+    
+    // node 级：如果任意 entity 未完成，同节点表头显示 syncing
+    document.querySelectorAll('.ds-item').forEach(item => {
+        const badge = item.querySelector('.node-sync-badge');
+        if (!badge) return;
+        const rows = item.querySelectorAll('.ds-entity-row');
+        if (!rows.length) { badge.style.display = 'none'; return; }
+        let anyNotDone = false;
+        rows.forEach(r => {
+            if (r.dataset.done !== '1') anyNotDone = true;
+        });
+        badge.style.display = anyNotDone ? 'inline-block' : 'none';
+    });
+    
+    // source 级：如果任意 entity 未完成，source 表头显示 syncing
+    document.querySelectorAll('.graph-source').forEach(gs => {
+        const srcName = gs.dataset.sourceName || '';
+        const badge = gs.querySelector('.source-sync-badge');
+        if (!badge) return;
+        badge.style.display = sourceSyncMap.get(srcName) ? 'inline-block' : 'none';
+    });
 }
 
 document.addEventListener('DOMContentLoaded', refreshGraphStatus);
@@ -146,12 +273,13 @@ function renderGraphSources(data) {
         
         const progressClass = stats.progress > 99 ? 'synced' : (stats.progress > 90 ? 'behind' : 'error');
         
-        html += `<div class="graph-source" onclick="toggleSource(this)">
+        html += `<div class="graph-source" data-source-name="${name}" onclick="toggleSource(this)">
             <div class="graph-source-header">
                 <div class="graph-source-title">
                     <span class="graph-source-name">${name}</span>
                     <span class="graph-source-id">${src.subgraph_id}</span>
                     ${statusBadge}
+                    <span class="badge badge-warning source-sync-badge" style="display:none;">syncing</span>
                 </div>
                 <div class="graph-source-stats">
                     ${!hasError ? `
@@ -183,6 +311,9 @@ function renderSourceBody(src) {
     }
     
     if (src.contract_nodes?.length) {
+        const configuredSet = new Set(src.configured_entities || []);
+        const sourceName = src.source_name || Object.keys(window._graphData?.sources || {}).find(k => window._graphData.sources[k] === src) || '';
+        
         html += `<div class="data-sources"><div class="title">智能合约节点 (${src.contract_nodes.length})</div>`;
         for (const node of src.contract_nodes) {
             const isStatic = node.type === 'static';
@@ -190,11 +321,17 @@ function renderSourceBody(src) {
             const typeClass = isStatic ? 'static' : 'dynamic';
             const progressClass = node.progress > 99 ? 'synced' : (node.progress > 90 ? 'behind' : 'error');
             const behindClass = node.behind < 100 ? 'synced' : (node.behind < 10000 ? 'behind' : 'error');
+            
+            // 分离 entities
+            const grayEntities = (node.entities || []).filter(e => !configuredSet.has(e));
+            const greenEntities = (node.entities || []).filter(e => configuredSet.has(e));
+            
             html += `<div class="ds-item ${typeClass}">
                 <div class="ds-row">
                     <div class="ds-left">
                         <span class="ds-type ${typeClass}">${typeLabel}</span>
                         <span class="ds-name">${node.name}</span>
+                        <span class="badge badge-warning node-sync-badge" style="display:none;">syncing</span>
                         <div class="ds-blocks">
                             ${isStatic ? `<span>Start: <span class="val">${node.start_block?.toLocaleString()}</span></span>` : ''}
                             <span>Indexed: <span class="val">${node.indexed?.toLocaleString() || 'N/A'}</span></span>
@@ -208,10 +345,22 @@ function renderSourceBody(src) {
                     </div>
                 </div>
                 ${node.address ? `<div class="ds-addr">${node.address}</div>` : ''}
-                ${node.entities?.length ? `<div class="ds-entities"><span class="ds-entities-label">Entities:</span> ${node.entities.map(e => `<span>${e}</span>`).join('')}</div>` : ''}
+                <div class="ds-entities">
+                    ${grayEntities.length ? `<div class="ds-entities-gray">${grayEntities.map(e => `<span>${e}</span>`).join('')}</div>` : ''}
+                    ${greenEntities.map(e => `<div class="ds-entity-row" data-source="${sourceName}" data-entity="${e}" data-done="0" data-syncing="0">
+                        <span class="name">${e}</span>
+                        <span class="stat count" data-field="count">-</span>
+                        <span class="size" title="估算 DB 大小 (MB)"><span data-field="size_mb">-</span>MB</span>
+                        <span class="sync-status" title="同步状态" data-field="sync">-</span>
+                        <span class="qos">
+                            <span title="速度"><span data-field="speed">-</span>/s</span>
+                            <span title="延时"><span data-field="latency">-</span>ms</span>
+                            <span title="成功率"><span data-field="success">-</span>%</span>
+                        </span>
+                    </div>`).join('')}
+                </div>
             </div>`;
         }
-        html += `<div class="ds-output-entities"><span class="ds-entities-label">索引 Entities(输出):</span> ${src.output_entities?.map(e => `<span>${e}</span>`).join('') || ''}</div>`;
         html += '</div>';
     }
     

@@ -1,14 +1,15 @@
-"""
-The Graph 节点状态查询模块 (异步版本)
-"""
+"""The Graph 节点状态查询"""
 import json
 import yaml
 import asyncio
 from pathlib import Path
 from typing import Optional, AsyncGenerator
 import httpx
+from functools import lru_cache
 
-# 多链 RPC (公共节点)
+from main import BACKEND_API
+
+# 常量
 CHAIN_RPCS = {
     "matic": "https://polygon-rpc.com",
     "polygon": "https://polygon-rpc.com",
@@ -17,32 +18,22 @@ CHAIN_RPCS = {
     "optimism": "https://mainnet.optimism.io",
     "base": "https://mainnet.base.org",
 }
-# IPFS Gateway
+NETWORK_NAMES = {
+    "matic": "Polygon", "polygon": "Polygon",
+    "mainnet": "Ethereum", "arbitrum-one": "Arbitrum",
+    "optimism": "Optimism", "base": "Base",
+}
 IPFS_GATEWAY = "https://ipfs.network.thegraph.com/api/v0/cat"
-# The Graph Network Subgraph (Arbitrum One)
 NETWORK_SUBGRAPH_ID = "DZz4kDTdmzWLWsV373w2bSmoar3umKKH9y82SUKr5qmp"
 
-# 链名称映射
-NETWORK_NAMES = {
-    "matic": "Polygon",
-    "mainnet": "Ethereum",
-    "arbitrum-one": "Arbitrum",
-    "optimism": "Optimism",
-    "base": "Base",
-    "polygon": "Polygon",
-}
-
-_config = None
-_manifest_cache = {}  # deployment_cid -> manifest
+_manifest_cache = {}
 
 
+@lru_cache(maxsize=1)
 def get_config():
-    global _config
-    if _config is None:
-        config_path = Path(__file__).parent.parent / "config.json"
-        with open(config_path) as f:
-            _config = json.load(f)
-    return _config
+    config_path = Path(__file__).parent.parent / "config.json"
+    with open(config_path) as f:
+        return json.load(f)
 
 
 async def fetch_subgraph_meta(client: httpx.AsyncClient, subgraph_id: str, api_key: str) -> dict:
@@ -147,6 +138,17 @@ async def fetch_chain_block(client: httpx.AsyncClient, network: str, cache: dict
     except:
         pass
     return None
+
+
+async def fetch_local_stats(client: httpx.AsyncClient) -> dict:
+    """获取本地数据库中每个表的记录数"""
+    try:
+        resp = await client.get(f"{BACKEND_API}/api/stats", timeout=5)
+        if resp.status_code == 200:
+            return resp.json()
+    except:
+        pass
+    return {}
 
 
 async def fetch_manifest(client: httpx.AsyncClient, deployment_cid: str) -> Optional[dict]:
@@ -265,8 +267,11 @@ async def get_graph_status_stream() -> AsyncGenerator[dict, None]:
     
     result = {"sources": {}}
     chain_block_cache = {}
+    local_stats = {}
     
     async with httpx.AsyncClient() as client:
+        # Step 0: 获取本地数据库 stats
+        local_stats = await fetch_local_stats(client)
         # Step 1: 并发查询所有 subgraph 的 meta
         yield {"type": "status", "msg": f"查询 {total} 个 subgraph meta..."}
         
@@ -336,6 +341,9 @@ async def get_graph_status_stream() -> AsyncGenerator[dict, None]:
         
         for name, src, meta in meta_results:
             subgraph_id = src.get("subgraph_id", "")
+            # entities 现在是 dict: {entity_name: table_name}
+            entity_table_map = src.get("entities", {})
+            configured_entities = list(entity_table_map.keys())
             
             if name in dep_info_map:
                 info = dep_info_map[name]
@@ -352,12 +360,24 @@ async def get_graph_status_stream() -> AsyncGenerator[dict, None]:
             indexed_block = meta.get("block", {}).get("number", 0) if not meta.get("error") else 0
             avg_progress = compute_node_stats(contract_nodes, indexed_block, chain_block_cache)
             
+            # 计算每个 configured entity 的本地记录数
+            entity_stats = {}
+            for entity in configured_entities:
+                table = entity_table_map.get(entity, "")
+                if table and table in local_stats:
+                    entity_stats[entity] = local_stats[table]
+                else:
+                    entity_stats[entity] = 0
+            
             result["sources"][name] = {
+                "source_name": name,  # 用于前端构建 entity stats key
                 "subgraph_id": subgraph_id,
                 "deployment_cid": deployment_cid,
                 "meta": meta,
                 "contract_nodes": contract_nodes,
                 "output_entities": output_entities,
+                "configured_entities": configured_entities,  # 配置的 entities
+                "entity_stats": entity_stats,  # 每个 entity 的本地记录数
                 "indexer_info": indexer_info,
                 "stats": {
                     "progress": avg_progress,
