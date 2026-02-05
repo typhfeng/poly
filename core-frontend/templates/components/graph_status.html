@@ -776,17 +776,18 @@
     btn.textContent = "...";
     statusMsg.textContent = "导出中...";
 
+    const limit = 10000;
     try {
-      const resp = await fetch("/api/export?limit=10000");
+      const resp = await fetch(`/api/export?limit=${limit}`);
       const data = await resp.json();
       if (data.error) {
-        statusMsg.textContent = "导出失败: " + data.error;
+        statusMsg.textContent = "导出失败（请关闭编辑器中的csv文件）";
       } else {
-        statusMsg.textContent = `导出完成: ${data.exported_tables} 表, ${data.total_rows} 行`;
+        statusMsg.textContent = `导出完成: ${data.exported_tables} 表, 每表最多 ${limit} 条`;
         setTimeout(() => { statusMsg.textContent = ""; }, 3000);
       }
     } catch (e) {
-      statusMsg.textContent = "导出失败";
+      statusMsg.textContent = "导出失败（请关闭编辑器中的csv文件）";
     } finally {
       btn.disabled = false;
       btn.textContent = "导出";
