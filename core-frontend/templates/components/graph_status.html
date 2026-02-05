@@ -435,7 +435,7 @@
 <div class="graph-card" id="graph-status-card">
   <div class="graph-header">
     <h2>索引服务器节点-状态</h2>
-    <div style="display: flex; align-items: center">
+    <div style="display: flex; align-items: center; gap: 6px">
       <span class="graph-status-msg" id="graph-status-msg"></span>
       <button
         class="btn-sm"
@@ -443,6 +443,13 @@
         id="graph-refresh-btn"
       >
         刷新
+      </button>
+      <button
+        class="btn-sm"
+        onclick="exportData()"
+        id="graph-export-btn"
+      >
+        导出
       </button>
     </div>
   </div>
@@ -761,6 +768,30 @@
   }
 
   document.addEventListener("DOMContentLoaded", refreshGraphStatus);
+
+  async function exportData() {
+    const btn = document.getElementById("graph-export-btn");
+    const statusMsg = document.getElementById("graph-status-msg");
+    btn.disabled = true;
+    btn.textContent = "...";
+    statusMsg.textContent = "导出中...";
+
+    try {
+      const resp = await fetch("/api/export?limit=10000");
+      const data = await resp.json();
+      if (data.error) {
+        statusMsg.textContent = "导出失败: " + data.error;
+      } else {
+        statusMsg.textContent = `导出完成: ${data.exported_tables} 表, ${data.total_rows} 行`;
+        setTimeout(() => { statusMsg.textContent = ""; }, 3000);
+      }
+    } catch (e) {
+      statusMsg.textContent = "导出失败";
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "导出";
+    }
+  }
 
   function renderGraphSources(data) {
     let html = "";

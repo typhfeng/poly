@@ -172,3 +172,59 @@ async def api_sql(q: str = Query(...)):
     """执行自定义 SQL 查询(只读)"""
     assert q.strip().upper().startswith("SELECT"), "只允许 SELECT 查询"
     return sql_query(q)
+
+
+def _load_export_tables():
+    """从 config.json 读取所有 entity -> table 映射"""
+    config_path = Path(__file__).parent.parent / "config.json"
+    with open(config_path) as f:
+        config = json.load(f)
+    tables = []
+    for source in config.get("sources", {}).values():
+        for table in source.get("entities", {}).values():
+            if table not in tables:
+                tables.append(table)
+    return tables
+
+
+def _get_order_column(table: str) -> str:
+    """获取表的排序字段：优先 timestamp 类字段，否则用 id"""
+    schema = backend_get("/api/sql", {"q": f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table}'"}, default=[])
+    cols = {r.get("column_name", "").lower() for r in schema}
+    # 优先级：timestamp > creation_timestamp > last_seen_timestamp > id
+    for c in ["timestamp", "creation_timestamp", "last_seen_timestamp", "last_active_day"]:
+        if c in cols:
+            return c
+    return "id"
+
+
+@app.get("/api/export")
+async def api_export(limit: int = Query(10000, le=100000)):
+    """导出每个 entity 最近 N 条到 data/export/"""
+    import csv
+
+    export_dir = Path(__file__).parent.parent / "data" / "export"
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    tables = _load_export_tables()
+    exported_tables = 0
+    total_rows = 0
+
+    for table in tables:
+        order_col = _get_order_column(table)
+        sql = f"SELECT * FROM {table} ORDER BY {order_col} DESC LIMIT {limit}"
+        rows = sql_query(sql)
+        if not rows or isinstance(rows, dict) and "error" in rows:
+            continue
+
+        file_path = export_dir / f"{table}.csv"
+        with open(file_path, "w", newline="", encoding="utf-8") as f:
+            if rows:
+                writer = csv.DictWriter(f, fieldnames=rows[0].keys())
+                writer.writeheader()
+                writer.writerows(rows)
+
+        exported_tables += 1
+        total_rows += len(rows)
+
+    return {"exported_tables": exported_tables, "total_rows": total_rows, "path": str(export_dir)}
