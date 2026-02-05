@@ -56,11 +56,11 @@ inline bool is_list_of(const json &t, const std::string &target_name) {
 // EntityInfo - entity 的 schema 信息
 // ============================================================================
 struct EntityInfo {
-  std::string type_name;   // 类型名 (如 EnrichedOrderFilled)
-  std::string plural;      // 复数查询名 (如 enrichedOrderFilleds)
-  std::string table_name;  // 表名 (如 enriched_order_filled)
-  std::vector<std::string> field_parts;  // 字段选择 (如 "id", "maker { id }")
-  std::vector<std::string> flat_fields;  // 扁平字段名 (用于 CSV header)
+  std::string type_name;                // 类型名 (如 EnrichedOrderFilled)
+  std::string plural;                   // 复数查询名 (如 enrichedOrderFilleds)
+  std::string table_name;               // 表名 (如 enriched_order_filled)
+  std::vector<std::string> field_parts; // 字段选择 (如 "id", "maker { id }")
+  std::vector<std::string> flat_fields; // 扁平字段名 (用于 CSV header)
 };
 
 // ============================================================================
@@ -82,12 +82,14 @@ public:
       : pool_(pool), config_(config) {}
 
   // 启动导出（异步）
-  void start(const std::string &export_dir, int limit) {
+  // order_desc: true=最新数据(desc), false=最早数据(asc)
+  void start(const std::string &export_dir, int limit, bool order_desc = true) {
     results_.clear();
     pending_count_ = 0;
     done_count_ = 0;
     export_dir_ = export_dir;
     limit_ = limit;
+    order_desc_ = order_desc;
 
     fs::create_directories(export_dir_);
 
@@ -221,14 +223,16 @@ private:
     // 构建查询
     std::string fields_str;
     for (size_t i = 0; i < info.field_parts.size(); ++i) {
-      if (i > 0) fields_str += " ";
+      if (i > 0)
+        fields_str += " ";
       fields_str += info.field_parts[i];
     }
 
     // 先尝试带 orderBy
+    std::string order_dir = order_desc_ ? "desc" : "asc";
     std::string query = R"({"query":"{ )" + info.plural +
                         "(first: " + std::to_string(limit_) +
-                        ", orderBy: id, orderDirection: desc) { " + fields_str + R"( } }"})";
+                        ", orderBy: id, orderDirection: " + order_dir + ") { " + fields_str + R"( } }"})";
 
     pool_.async_post(target, query, [this, src, target, info, fields_str](std::string body) {
       on_data_response(src, target, info, fields_str, body, true);
@@ -286,7 +290,8 @@ private:
 
     // header
     for (size_t i = 0; i < info.flat_fields.size(); ++i) {
-      if (i > 0) ofs << ",";
+      if (i > 0)
+        ofs << ",";
       ofs << info.flat_fields[i];
     }
     ofs << "\n";
@@ -294,7 +299,8 @@ private:
     // rows
     for (const auto &row : rows) {
       for (size_t i = 0; i < info.flat_fields.size(); ++i) {
-        if (i > 0) ofs << ",";
+        if (i > 0)
+          ofs << ",";
         const auto &field = info.flat_fields[i];
         if (row.contains(field)) {
           const auto &v = row[field];
@@ -351,6 +357,7 @@ private:
   const Config &config_;
   std::string export_dir_;
   int limit_ = 100;
+  bool order_desc_ = true;
 
   std::mutex mutex_;
   std::vector<ExportResult> results_;

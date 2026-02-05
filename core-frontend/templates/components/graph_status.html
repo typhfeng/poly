@@ -520,6 +520,10 @@
       <button class="btn-sm" onclick="refreshGraphStatus()" id="graph-refresh-btn">
         刷新
       </button>
+      <select id="graph-export-order" class="btn-sm" style="padding: 2px 4px;">
+        <option value="desc">最新</option>
+        <option value="asc">最早</option>
+      </select>
       <button class="btn-sm" onclick="exportData()" id="graph-export-btn">
         导出
       </button>
@@ -844,18 +848,21 @@
   async function exportData() {
     const btn = document.getElementById("graph-export-btn");
     const statusMsg = document.getElementById("graph-status-msg");
+    const orderSelect = document.getElementById("graph-export-order");
     btn.disabled = true;
     btn.textContent = "...";
     statusMsg.textContent = "导出中...";
 
     const limit = 1000;
+    const order = orderSelect.value;
     try {
-      const resp = await fetch(`/api/export?limit=${limit}`);
+      const resp = await fetch(`/api/export?limit=${limit}&order=${order}`);
       const data = await resp.json();
       if (data.error) {
         statusMsg.textContent = "导出失败";
       } else {
-        statusMsg.textContent = `导出完成: ${data.exported_tables} 表, 每表最多 ${limit} 条`;
+        const orderText = order === "asc" ? "最早" : "最新";
+        statusMsg.textContent = `导出完成: ${data.exported_tables} 表, ${orderText} ${limit} 条`;
         setTimeout(() => { statusMsg.textContent = ""; }, 3000);
       }
     } catch (e) {

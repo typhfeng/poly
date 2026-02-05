@@ -280,9 +280,13 @@ private:
     if (limit > 1000)
       limit = 1000;
 
+    // order=desc(默认,最新数据) 或 order=asc(最早数据)
+    std::string order_str = get_param("order");
+    bool order_desc = (order_str != "asc");
+
     // 创建 introspector 并启动导出
     auto intro = std::make_shared<introspector::Introspector>(pool_, config_);
-    intro->start(export_dir_, limit);
+    intro->start(export_dir_, limit, order_desc);
 
     // 异步等待完成（通过定时器轮询）
     auto self = shared_from_this();

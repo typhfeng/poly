@@ -7,8 +7,8 @@
 #define PARALLEL_TOTAL 9999                   // 全局最大并发请求数
 #define GRAPHQL_BATCH_SIZE 1000               // 每次请求的 limit
 #define DB_FLUSH_THRESHOLD GRAPHQL_BATCH_SIZE // 累积多少条刷入 DB
-#define PULL_RETRY_DELAY_MS 10                // 初始重试延迟(ms)
-#define PULL_RETRY_MAX_DELAY_MS 100           // 最大重试延迟(ms)
+#define PULL_RETRY_DELAY_MS 50                // 初始重试延迟(ms)
+#define PULL_RETRY_MAX_DELAY_MS 50            // 最大重试延迟(ms)
 #define BUFFER_HARD_LIMIT 10000               // buffer 硬上限，超过则 assert
 
 #include <algorithm>
