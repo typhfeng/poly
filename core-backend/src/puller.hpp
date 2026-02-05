@@ -7,6 +7,7 @@
 #define PARALLEL_TOTAL 9999      // 全局最大并发请求数
 #define GRAPHQL_BATCH_SIZE 1000  // 每次请求的 limit
 #define DB_FLUSH_THRESHOLD 1000  // 累积多少条刷入 DB
+#define PULL_RETRY_DELAY_MS 10   // 重试延迟(ms)
 
 #include <algorithm>
 #include <cassert>
@@ -338,9 +339,8 @@ inline void EntityPuller::on_response(const std::string &body) {
   // 请求失败 - 重试
   if (body.empty()) {
     stats.record_failure(source_name_, entity_->name, FailureKind::NETWORK, latency_ms);
-    std::cerr << "[Pull] " << entity_->name << " 请求失败，5秒后重试" << std::endl;
-    // 延迟重试（backoff期间设置为PROCESSING状态）
-    pool_.schedule_retry([this]() { send_request(); }, 5000);
+    std::cerr << "[Pull] " << entity_->name << " 请求失败，重试" << std::endl;
+    pool_.schedule_retry([this]() { send_request(); }, PULL_RETRY_DELAY_MS);
     return;
   }
 
@@ -350,8 +350,8 @@ inline void EntityPuller::on_response(const std::string &body) {
     j = json::parse(body);
   } catch (...) {
     stats.record_failure(source_name_, entity_->name, FailureKind::JSON, latency_ms);
-    std::cerr << "[Pull] " << entity_->name << " JSON 解析失败，5秒后重试" << std::endl;
-    pool_.schedule_retry([this]() { send_request(); }, 5000);
+    std::cerr << "[Pull] " << entity_->name << " JSON 解析失败，重试" << std::endl;
+    pool_.schedule_retry([this]() { send_request(); }, PULL_RETRY_DELAY_MS);
     return;
   }
 
@@ -405,16 +405,16 @@ inline void EntityPuller::on_response(const std::string &body) {
       }
     }
     std::cerr << "[Pull] " << entity_->name << " GraphQL 错误: " << j["errors"].dump() << std::endl;
-    std::cerr << "[Pull] " << entity_->name << " 5秒后重试" << std::endl;
-    pool_.schedule_retry([this]() { send_request(); }, 5000);
+    std::cerr << "[Pull] " << entity_->name << " 重试" << std::endl;
+    pool_.schedule_retry([this]() { send_request(); }, PULL_RETRY_DELAY_MS);
     return;
   }
 
   // 响应格式错误 - 重试
   if (!j.contains("data") || !j["data"].contains(entity_->plural)) {
     stats.record_failure(source_name_, entity_->name, FailureKind::FORMAT, latency_ms);
-    std::cerr << "[Pull] " << entity_->name << " 响应格式错误，5秒后重试" << std::endl;
-    pool_.schedule_retry([this]() { send_request(); }, 5000);
+    std::cerr << "[Pull] " << entity_->name << " 响应格式错误，重试" << std::endl;
+    pool_.schedule_retry([this]() { send_request(); }, PULL_RETRY_DELAY_MS);
     return;
   }
 

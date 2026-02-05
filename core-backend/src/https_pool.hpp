@@ -7,8 +7,6 @@
 #define HTTPS_TIMEOUT_SEC 30 // 请求超时
 #define HTTPS_HOST "gateway.thegraph.com"
 #define HTTPS_PORT "443"
-#define HTTPS_MAX_RETRY 3        // 最大重试次数
-#define HTTPS_RETRY_DELAY_MS 500 // 重试延迟基数
 
 #include <cassert>
 #include <functional>
@@ -183,7 +181,7 @@ public:
   }
 
   void async_post(const std::string &target, const std::string &body, Callback cb) {
-    do_request(target, body, std::move(cb), 0);
+    do_request(target, body, std::move(cb));
   }
 
   void return_session(std::shared_ptr<HttpsSession> session) {
@@ -194,25 +192,10 @@ public:
     process_pending();
   }
 
-  void on_request_failed(const std::string &target, const std::string &body,
-                         Callback cb, int retry_count) {
+  void on_request_failed(Callback cb) {
     --active_count_;
-
-    if (retry_count < HTTPS_MAX_RETRY) {
-      int delay = HTTPS_RETRY_DELAY_MS * (1 << retry_count); // 指数退避
-      std::cerr << "[HTTPS] 重试 " << (retry_count + 1) << "/" << HTTPS_MAX_RETRY
-                << "，延迟 " << delay << "ms" << std::endl;
-
-      auto timer = std::make_shared<asio::steady_timer>(ioc_);
-      timer->expires_after(std::chrono::milliseconds(delay));
-      timer->async_wait([this, target, body, cb = std::move(cb), retry_count, timer](boost::system::error_code) mutable {
-        do_request(target, body, std::move(cb), retry_count + 1);
-      });
-    } else {
-      std::cerr << "[HTTPS] 重试耗尽" << std::endl;
-      cb("");
-      process_pending();
-    }
+    cb("");
+    process_pending();
   }
 
   int active_count() const { return active_count_; }
@@ -232,20 +215,19 @@ private:
     std::string target;
     std::string body;
     Callback cb;
-    int retry_count;
   };
 
   void do_request(const std::string &target, const std::string &body,
-                  Callback cb, int retry_count) {
+                  Callback cb) {
     if (active_count_ < HTTPS_POOL_SIZE) {
-      start_request(target, body, std::move(cb), retry_count);
+      start_request(target, body, std::move(cb));
     } else {
-      pending_.push({target, body, std::move(cb), retry_count});
+      pending_.push({target, body, std::move(cb)});
     }
   }
 
   void start_request(const std::string &target, const std::string &body,
-                     Callback cb, int retry_count) {
+                     Callback cb) {
     ++active_count_;
 
     std::shared_ptr<HttpsSession> session;
@@ -257,11 +239,11 @@ private:
     }
 
     session->run(target, body,
-                 [this, target, body, cb = std::move(cb), retry_count](std::string response, bool success) mutable {
+                 [this, cb = std::move(cb)](std::string response, bool success) mutable {
                    if (success) {
                      cb(std::move(response));
                    } else {
-                     on_request_failed(target, body, std::move(cb), retry_count);
+                     on_request_failed(std::move(cb));
                    }
                  });
   }
@@ -270,7 +252,7 @@ private:
     while (!pending_.empty() && active_count_ < HTTPS_POOL_SIZE) {
       auto req = std::move(pending_.front());
       pending_.pop();
-      start_request(req.target, req.body, std::move(req.cb), req.retry_count);
+      start_request(req.target, req.body, std::move(req.cb));
     }
   }
 
