@@ -848,7 +848,7 @@
     btn.textContent = "...";
     statusMsg.textContent = "导出中...";
 
-    const limit = 10000;
+    const limit = 1000;
     try {
       const resp = await fetch(`/api/export?limit=${limit}`);
       const data = await resp.json();

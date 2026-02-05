@@ -5,6 +5,7 @@
 // ============================================================================
 
 #include "rebuilder_types.hpp"
+#include <algorithm>
 #include <cassert>
 #include <duckdb.hpp>
 #include <nlohmann/json.hpp>
@@ -20,7 +21,7 @@ class Loader {
 public:
   explicit Loader(duckdb::Connection &conn) : conn_(conn) {}
 
-  // 加载 condition 配置到内存
+  // 加载 pnl_condition，建立 positionId → conditionId 反向映射
   std::unordered_map<std::string, ConditionConfig> load_conditions() {
     std::unordered_map<std::string, ConditionConfig> configs;
 
@@ -70,6 +71,18 @@ public:
     return configs;
   }
 
+  // 构建 positionId → (conditionId, outcomeIndex) 反向映射
+  std::unordered_map<std::string, std::pair<std::string, int>> build_position_to_condition_map(
+      const std::unordered_map<std::string, ConditionConfig> &conditions) {
+    std::unordered_map<std::string, std::pair<std::string, int>> map;
+    for (const auto &[cond_id, cfg] : conditions) {
+      for (size_t i = 0; i < cfg.position_ids.size(); ++i) {
+        map[cfg.position_ids[i]] = {cond_id, static_cast<int>(i)};
+      }
+    }
+    return map;
+  }
+
   // 获取所有用户列表（从 order、merge、redemption 中提取）
   std::vector<std::string> get_all_users() {
     auto result = conn_.Query(R"(
@@ -97,35 +110,69 @@ public:
   std::vector<Event> load_user_events(const std::string &user) {
     std::vector<Event> events;
 
-    // 1. 加载订单事件（maker 作为用户）
-    auto order_result = conn_.Query(
-        "SELECT timestamp, id, order_hash, side, size, price "
+    // 1. 加载订单事件（maker 视角: maker 是挂单方）
+    // side=Buy: maker 买入 token, 支付 USDC
+    // side=Sell: maker 卖出 token, 收取 USDC
+    auto maker_result = conn_.Query(
+        "SELECT timestamp, id, token_id, side, size, price "
         "FROM enriched_order_filled "
         "WHERE maker = '" +
         escape_sql(user) +
         "' "
         "ORDER BY timestamp, id");
-    assert(!order_result->HasError());
+    assert(!maker_result->HasError());
 
-    for (size_t row = 0; row < order_result->RowCount(); ++row) {
+    for (size_t row = 0; row < maker_result->RowCount(); ++row) {
       Event e;
-      e.timestamp = order_result->GetValue(0, row).GetValue<int64_t>();
-      e.event_type = "order";
-      e.event_id = order_result->GetValue(1, row).ToString();
+      e.timestamp = maker_result->GetValue(0, row).GetValue<int64_t>();
+      e.event_type = "order_maker";
+      e.event_id = maker_result->GetValue(1, row).ToString();
       e.user = user;
-      e.token_id = order_result->GetValue(2, row).ToString();
-      e.side = order_result->GetValue(3, row).ToString();
+      e.token_id = maker_result->GetValue(2, row).ToString();
+      e.side = maker_result->GetValue(3, row).ToString();
 
-      auto size_val = order_result->GetValue(4, row);
+      auto size_val = maker_result->GetValue(4, row);
       e.size = size_val.IsNull() ? 0 : std::stoll(size_val.ToString());
 
-      auto price_val = order_result->GetValue(5, row);
+      auto price_val = maker_result->GetValue(5, row);
       e.price = price_val.IsNull() ? 0.0 : price_val.GetValue<double>();
 
       events.push_back(std::move(e));
     }
 
-    // 2. 加载 merge 事件
+    // 2. 加载订单事件（taker 视角: taker 是吃单方，side 相反）
+    // maker side=Buy: taker 卖出 token
+    // maker side=Sell: taker 买入 token
+    auto taker_result = conn_.Query(
+        "SELECT timestamp, id, token_id, side, size, price "
+        "FROM enriched_order_filled "
+        "WHERE taker = '" +
+        escape_sql(user) +
+        "' "
+        "ORDER BY timestamp, id");
+    assert(!taker_result->HasError());
+
+    for (size_t row = 0; row < taker_result->RowCount(); ++row) {
+      Event e;
+      e.timestamp = taker_result->GetValue(0, row).GetValue<int64_t>();
+      e.event_type = "order_taker";
+      e.event_id = taker_result->GetValue(1, row).ToString();
+      e.user = user;
+      e.token_id = taker_result->GetValue(2, row).ToString();
+      // taker 的 side 是 maker side 的反向
+      std::string maker_side = taker_result->GetValue(3, row).ToString();
+      e.side = (maker_side == "Buy") ? "Sell" : "Buy";
+
+      auto size_val = taker_result->GetValue(4, row);
+      e.size = size_val.IsNull() ? 0 : std::stoll(size_val.ToString());
+
+      auto price_val = taker_result->GetValue(5, row);
+      e.price = price_val.IsNull() ? 0.0 : price_val.GetValue<double>();
+
+      events.push_back(std::move(e));
+    }
+
+    // 3. 加载 merge 事件 (用 collateral 铸造 condition 的所有 outcome tokens)
     auto merge_result = conn_.Query(
         "SELECT timestamp, id, condition_id, amount "
         "FROM merge "
@@ -149,7 +196,7 @@ public:
       events.push_back(std::move(e));
     }
 
-    // 3. 加载 redemption 事件
+    // 4. 加载 redemption 事件 (用 tokens 换回 collateral)
     auto redeem_result = conn_.Query(
         "SELECT timestamp, id, condition_id, payout "
         "FROM redemption "

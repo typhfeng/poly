@@ -3,13 +3,13 @@
 // ============================================================================
 // 宏配置
 // ============================================================================
-#define PARALLEL_PER_SOURCE 9999      // 每个 source 内最多并行 entity 数
-#define PARALLEL_TOTAL 9999           // 全局最大并发请求数
-#define GRAPHQL_BATCH_SIZE 1000       // 每次请求的 limit
-#define DB_FLUSH_THRESHOLD 1000       // 累积多少条刷入 DB
-#define PULL_RETRY_DELAY_MS 100       // 初始重试延迟(ms)
-#define PULL_RETRY_MAX_DELAY_MS 30000 // 最大重试延迟(ms)
-#define BUFFER_HARD_LIMIT 10000       // buffer 硬上限，超过则 assert
+#define PARALLEL_PER_SOURCE 9999              // 每个 source 内最多并行 entity 数
+#define PARALLEL_TOTAL 9999                   // 全局最大并发请求数
+#define GRAPHQL_BATCH_SIZE 50                 // 每次请求的 limit
+#define DB_FLUSH_THRESHOLD GRAPHQL_BATCH_SIZE // 累积多少条刷入 DB
+#define PULL_RETRY_DELAY_MS 10                // 初始重试延迟(ms)
+#define PULL_RETRY_MAX_DELAY_MS 100           // 最大重试延迟(ms)
+#define BUFFER_HARD_LIMIT 10000               // buffer 硬上限，超过则 assert
 
 #include <algorithm>
 #include <cassert>
@@ -192,8 +192,8 @@ public:
     // 预分配空间，避免向量重新分配导致 scheduler_ 指针失效
     schedulers_.reserve(config.sources.size());
     for (const auto &src : config.sources) {
-      bool is_pnl = std::any_of(src.entities.begin(), src.entities.end(),
-                                [](const std::string &e) { return e == "UserPosition"; });
+      // 判断是否是 PnL subgraph：名字包含 "Profit and Loss"
+      bool is_pnl = src.name.find("Profit and Loss") != std::string::npos;
       schedulers_.emplace_back(src, db_, pool_, this, is_pnl);
     }
   }

@@ -4,6 +4,7 @@
 // 简单 HTTP 服务器，提供查询 API
 // ============================================================================
 
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -15,21 +16,28 @@
 #include "db.hpp"
 #include "entities.hpp"
 #include "entity_stats.hpp"
+#include "introspector.hpp"
 #include "rebuilder.hpp"
 
+namespace fs = std::filesystem;
 namespace asio = boost::asio;
 namespace beast = boost::beast;
 namespace http = beast::http;
 using tcp = asio::ip::tcp;
 using json = nlohmann::json;
 
+// 前向声明
+class HttpServer;
+
 // ============================================================================
 // HTTP Session
 // ============================================================================
 class HttpSession : public std::enable_shared_from_this<HttpSession> {
 public:
-  HttpSession(tcp::socket socket, Database &db, rebuilder::Rebuilder &rebuilder)
-      : socket_(std::move(socket)), db_(db), rebuilder_(rebuilder) {}
+  HttpSession(tcp::socket socket, Database &db, rebuilder::Rebuilder &rebuilder,
+              HttpsPool &pool, const Config &config, const std::string &export_dir)
+      : socket_(std::move(socket)), db_(db), rebuilder_(rebuilder),
+        pool_(pool), config_(config), export_dir_(export_dir) {}
 
   void run() {
     do_read();
@@ -84,6 +92,9 @@ private:
         handle_rebuild_all();
       } else if (target.starts_with("/api/rebuild")) {
         handle_rebuild_user();
+      } else if (target.starts_with("/api/export-raw")) {
+        handle_export_raw();
+        return;  // async handler, do_write() called in callback
       } else {
         res_.result(http::status::not_found);
         res_.set(http::field::content_type, "application/json");
@@ -261,6 +272,64 @@ private:
     res_.body() = result.dump();
   }
 
+  void handle_export_raw() {
+    res_.set(http::field::content_type, "application/json");
+
+    std::string limit_str = get_param("limit");
+    int limit = limit_str.empty() ? 100 : std::stoi(limit_str);
+    if (limit > 1000)
+      limit = 1000;
+
+    // 创建 introspector 并启动导出
+    auto intro = std::make_shared<introspector::Introspector>(pool_, config_);
+    intro->start(export_dir_, limit);
+
+    // 异步等待完成（通过定时器轮询）
+    auto self = shared_from_this();
+    auto timer = std::make_shared<asio::steady_timer>(socket_.get_executor());
+
+    auto check_done = std::make_shared<std::function<void()>>();
+    *check_done = [this, self, intro, timer, check_done]() mutable {
+      if (intro->is_done()) {
+        const auto &results = intro->get_results();
+        json j_results = json::object();
+        int ok_count = 0;
+        for (const auto &r : results) {
+          std::string key = r.source + "/" + r.entity;
+          if (r.error.empty()) {
+            j_results[key] = {{"ok", r.rows}};
+            if (r.rows > 0)
+              ++ok_count;
+          } else {
+            j_results[key] = {{"error", r.error}};
+          }
+        }
+
+        res_.result(http::status::ok);
+        res_.body() = json{
+            {"path", export_dir_},
+            {"exported_tables", ok_count},
+            {"results", j_results}}
+                          .dump();
+        res_.prepare_payload();
+        do_write();
+
+        // 打破循环引用
+        *check_done = nullptr;
+      } else {
+        timer->expires_after(std::chrono::milliseconds(100));
+        timer->async_wait([check_done](boost::system::error_code) {
+          if (*check_done) (*check_done)();
+        });
+      }
+    };
+
+    timer->expires_after(std::chrono::milliseconds(100));
+    timer->async_wait([check_done](boost::system::error_code) {
+      (*check_done)();
+    });
+  }
+
   void do_write() {
     http::async_write(socket_, res_,
                       [self = shared_from_this()](beast::error_code ec, std::size_t) {
@@ -289,6 +358,9 @@ private:
   tcp::socket socket_;
   Database &db_;
   rebuilder::Rebuilder &rebuilder_;
+  HttpsPool &pool_;
+  const Config &config_;
+  std::string export_dir_;
   beast::flat_buffer buffer_;
   http::request<http::string_body> req_;
   http::response<http::string_body> res_;
@@ -299,9 +371,13 @@ private:
 // ============================================================================
 class HttpServer {
 public:
-  HttpServer(asio::io_context &ioc, Database &db, unsigned short port)
+  HttpServer(asio::io_context &ioc, Database &db, HttpsPool &pool,
+             const Config &config, unsigned short port)
       : ioc_(ioc), acceptor_(ioc, tcp::endpoint(tcp::v4(), port)), db_(db),
-        rebuilder_(db.get_duckdb()) {
+        pool_(pool), config_(config), rebuilder_(db.get_duckdb()) {
+    // 设置导出目录
+    export_dir_ = fs::current_path().string() + "/data/export";
+    fs::create_directories(export_dir_);
     std::cout << "[HTTP] 监听端口 " << port << std::endl;
     do_accept();
   }
@@ -311,7 +387,9 @@ private:
     acceptor_.async_accept(
         [this](beast::error_code ec, tcp::socket socket) {
           if (!ec) {
-            std::make_shared<HttpSession>(std::move(socket), db_, rebuilder_)->run();
+            std::make_shared<HttpSession>(std::move(socket), db_, rebuilder_,
+                                          pool_, config_, export_dir_)
+                ->run();
           }
           do_accept();
         });
@@ -320,5 +398,8 @@ private:
   asio::io_context &ioc_;
   tcp::acceptor acceptor_;
   Database &db_;
+  HttpsPool &pool_;
+  const Config &config_;
+  std::string export_dir_;
   rebuilder::Rebuilder rebuilder_;
 };

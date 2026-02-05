@@ -112,54 +112,12 @@ def sql_query(sql: str):
     return backend_get("/api/sql", {"q": sql})
 
 
-def _load_export_tables():
-    config_path = Path(__file__).parent.parent / "config.json"
-    with open(config_path) as f:
-        config = json.load(f)
-    tables = []
-    for source in config.get("sources", {}).values():
-        for table in source.get("entities", {}).values():
-            if table not in tables:
-                tables.append(table)
-    return tables
-
-
-def _get_order_column(table: str) -> str:
-    schema = backend_get(
-        "/api/sql", {"q": f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table}'"}, default=[])
-    cols = {r.get("column_name", "").lower() for r in schema}
-    for c in ["timestamp", "creation_timestamp", "last_seen_timestamp", "last_active_day"]:
-        if c in cols:
-            return c
-    return "id"
+# 长超时客户端（用于导出）
+_export_client = httpx.Client(timeout=300, trust_env=False)
 
 
 @app.get("/api/export")
-async def api_export(limit: int = Query(10000, le=100000)):
-    import csv
-
-    export_dir = Path(__file__).parent.parent / "data" / "export"
-    export_dir.mkdir(parents=True, exist_ok=True)
-
-    tables = _load_export_tables()
-    exported_tables = 0
-    total_rows = 0
-
-    for table in tables:
-        order_col = _get_order_column(table)
-        sql = f"SELECT * FROM {table} ORDER BY {order_col} DESC LIMIT {limit}"
-        rows = sql_query(sql)
-        if not rows or isinstance(rows, dict) and "error" in rows:
-            continue
-
-        file_path = export_dir / f"{table}.csv"
-        with open(file_path, "w", newline="", encoding="utf-8") as f:
-            if rows:
-                writer = csv.DictWriter(f, fieldnames=rows[0].keys())
-                writer.writeheader()
-                writer.writerows(rows)
-
-        exported_tables += 1
-        total_rows += len(rows)
-
-    return {"exported_tables": exported_tables, "total_rows": total_rows, "path": str(export_dir)}
+async def api_export(limit: int = Query(100, le=1000)):
+    """从 indexer 拉取原始数据导出（调用 C++ 后端并行实现）"""
+    resp = _export_client.get(f"{BACKEND_API}/api/export-raw", params={"limit": limit})
+    return resp.json()

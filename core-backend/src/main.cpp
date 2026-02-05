@@ -41,11 +41,13 @@ int main(int argc, char *argv[]) {
 
   asio::io_context ioc;
 
-  // HTTP 服务器(查询 API)
-  HttpServer http_server(ioc, db, 8001);
-
-  // HTTPS 连接池 + 数据拉取
+  // HTTPS 连接池
   HttpsPool pool(ioc, config.api_key);
+
+  // HTTP 服务器(查询 API + 导出 API)
+  HttpServer http_server(ioc, db, pool, config, 8001);
+
+  // 数据拉取
   Puller puller(config, db, pool);
 
   puller.run(ioc);

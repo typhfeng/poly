@@ -37,7 +37,7 @@ public:
 
       // 分发事件处理
       std::string token_id;
-      if (e.event_type == "order") {
+      if (e.event_type == "order_maker" || e.event_type == "order_taker") {
         process_order(e, result);
         token_id = e.token_id;
       } else if (e.event_type == "merge") {

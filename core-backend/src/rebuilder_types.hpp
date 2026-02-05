@@ -79,7 +79,7 @@ struct ConditionConfig {
 // ============================================================================
 struct Event {
   int64_t timestamp;
-  std::string event_type; // "order", "merge", "redemption"
+  std::string event_type; // "order_maker", "order_taker", "merge", "redemption"
   std::string event_id;
   std::string user;
 

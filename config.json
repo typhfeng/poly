@@ -11,20 +11,14 @@
         "Condition": "condition",
         "Merge": "merge",
         "Redemption": "redemption",
-        "Account": "account",
-        "EnrichedOrderFilled": "enriched_order_filled",
-        "MarketData": "market_data",
-        "Global": "global"
+        "EnrichedOrderFilled": "enriched_order_filled"
       }
     },
     "Polymarket Profit and Loss": {
       "subgraph_id": "6c58N5U4MtQE2Y8njfVrrAfRykzfqajMGeTMEvMmskVz",
       "enabled": true,
       "entities": {
-        "UserPosition": "user_position",
-        "Condition": "pnl_condition",
-        "NegRiskEvent": "neg_risk_event",
-        "FPMM": "pnl_fpmm"
+        "Condition": "pnl_condition"
       }
     }
   }
