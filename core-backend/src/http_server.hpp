@@ -65,7 +65,9 @@ private:
 
     try {
       // 路由
-      if (target.starts_with("/api/indexer-fails")) {
+      if (target.starts_with("/api/sql")) {
+        handle_sql();
+      } else if (target.starts_with("/api/indexer-fails")) {
         handle_indexer_fails();
       } else if (target.starts_with("/api/entity-latest")) {
         handle_entity_latest();
@@ -92,6 +94,33 @@ private:
 
     res_.prepare_payload();
     do_write();
+  }
+
+  void handle_sql() {
+    res_.set(http::field::content_type, "application/json");
+
+    std::string query = get_param("q");
+    assert(!query.empty() && "Missing query parameter 'q'");
+
+    // SQL 注入防护
+    std::string upper = query;
+    for (auto &c : upper)
+      c = std::toupper(c);
+    assert(upper.starts_with("SELECT") && "Only SELECT queries allowed");
+    assert(query.find(';') == std::string::npos && "Semicolon not allowed");
+    assert(query.find("--") == std::string::npos && "SQL comment not allowed");
+    assert(query.find("/*") == std::string::npos && "SQL comment not allowed");
+    assert(upper.find("INSERT") == std::string::npos && "INSERT not allowed");
+    assert(upper.find("UPDATE") == std::string::npos && "UPDATE not allowed");
+    assert(upper.find("DELETE") == std::string::npos && "DELETE not allowed");
+    assert(upper.find("DROP") == std::string::npos && "DROP not allowed");
+    assert(upper.find("CREATE") == std::string::npos && "CREATE not allowed");
+    assert(upper.find("ALTER") == std::string::npos && "ALTER not allowed");
+    assert(upper.find("TRUNCATE") == std::string::npos && "TRUNCATE not allowed");
+
+    json result = db_.query_json(query);
+    res_.result(http::status::ok);
+    res_.body() = result.dump();
   }
 
   std::string get_param(const char *name) {
