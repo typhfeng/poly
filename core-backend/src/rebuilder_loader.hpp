@@ -26,7 +26,7 @@ public:
     std::unordered_map<std::string, ConditionConfig> configs;
 
     auto result = conn_.Query(R"(
-      SELECT id, position_ids, payout_numerators, payout_denominator
+      SELECT id, positionIds, payoutNumerators, payoutDenominator
       FROM pnl_condition
     )");
     assert(!result->HasError() && "load_conditions failed");
@@ -114,7 +114,7 @@ public:
     // side=Buy: maker 买入 token, 支付 USDC
     // side=Sell: maker 卖出 token, 收取 USDC
     auto maker_result = conn_.Query(
-        "SELECT timestamp, id, token_id, side, size, price "
+        "SELECT timestamp, id, market, side, size, price "
         "FROM enriched_order_filled "
         "WHERE maker = '" +
         escape_sql(user) +
@@ -144,7 +144,7 @@ public:
     // maker side=Buy: taker 卖出 token
     // maker side=Sell: taker 买入 token
     auto taker_result = conn_.Query(
-        "SELECT timestamp, id, token_id, side, size, price "
+        "SELECT timestamp, id, market, side, size, price "
         "FROM enriched_order_filled "
         "WHERE taker = '" +
         escape_sql(user) +
@@ -174,7 +174,7 @@ public:
 
     // 3. 加载 merge 事件 (用 collateral 铸造 condition 的所有 outcome tokens)
     auto merge_result = conn_.Query(
-        "SELECT timestamp, id, condition_id, amount "
+        "SELECT timestamp, id, condition, amount "
         "FROM merge "
         "WHERE stakeholder = '" +
         escape_sql(user) +
@@ -198,7 +198,7 @@ public:
 
     // 4. 加载 redemption 事件 (用 tokens 换回 collateral)
     auto redeem_result = conn_.Query(
-        "SELECT timestamp, id, condition_id, payout "
+        "SELECT timestamp, id, condition, payout "
         "FROM redemption "
         "WHERE redeemer = '" +
         escape_sql(user) +

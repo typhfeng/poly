@@ -279,15 +279,15 @@ inline const EntityDef Condition = {
     .ddl = R"(CREATE TABLE IF NOT EXISTS condition (
         id VARCHAR PRIMARY KEY,
         oracle VARCHAR,
-        question_id VARCHAR,
-        outcome_slot_count INT,
-        resolution_timestamp BIGINT,
+        questionId VARCHAR,
+        outcomeSlotCount INT,
+        resolutionTimestamp BIGINT,
         payouts VARCHAR,
-        payout_numerators VARCHAR,
-        payout_denominator VARCHAR,
-        resolution_hash VARCHAR
+        payoutNumerators VARCHAR,
+        payoutDenominator VARCHAR,
+        resolutionHash VARCHAR
     ))",
-    .columns = "id, oracle, question_id, outcome_slot_count, resolution_timestamp, payouts, payout_numerators, payout_denominator, resolution_hash",
+    .columns = "id, oracle, questionId, outcomeSlotCount, resolutionTimestamp, payouts, payoutNumerators, payoutDenominator, resolutionHash",
     .to_values = condition_to_values};
 
 // ----------------------------------------------------------------------------
@@ -300,7 +300,7 @@ inline std::string merge_to_values(const json &j) {
          json_str(j, "stakeholder") + "," +
          json_str(j, "collateralToken") + "," +
          json_str(j, "parentCollectionId") + "," +
-         json_ref(j, "condition") + "," +
+         json_str(j, "condition") + "," +
          json_array(j, "partition") + "," +
          json_int(j, "amount");
 }
@@ -309,20 +309,20 @@ inline const EntityDef Merge = {
     .name = "Merge",
     .plural = "merges",
     .table = "merge",
-    .fields = "id timestamp stakeholder collateralToken parentCollectionId condition { id } partition amount",
+    .fields = "id timestamp stakeholder collateralToken parentCollectionId condition partition amount",
     .ddl = R"(CREATE TABLE IF NOT EXISTS merge (
         id VARCHAR PRIMARY KEY,
         timestamp BIGINT,
         stakeholder VARCHAR,
-        collateral_token VARCHAR,
-        parent_collection_id VARCHAR,
-        condition_id VARCHAR,
+        collateralToken VARCHAR,
+        parentCollectionId VARCHAR,
+        condition VARCHAR,
         partition VARCHAR,
         amount VARCHAR
     );
     CREATE INDEX IF NOT EXISTS idx_merge_ts ON merge(timestamp);
     CREATE INDEX IF NOT EXISTS idx_merge_user ON merge(stakeholder))",
-    .columns = "id, timestamp, stakeholder, collateral_token, parent_collection_id, condition_id, partition, amount",
+    .columns = "id, timestamp, stakeholder, collateralToken, parentCollectionId, condition, partition, amount",
     .to_values = merge_to_values};
 
 // ----------------------------------------------------------------------------
@@ -335,7 +335,7 @@ inline std::string redemption_to_values(const json &j) {
          json_str(j, "redeemer") + "," +
          json_str(j, "collateralToken") + "," +
          json_str(j, "parentCollectionId") + "," +
-         json_ref(j, "condition") + "," +
+         json_str(j, "condition") + "," +
          json_array(j, "indexSets") + "," +
          json_int(j, "payout");
 }
@@ -344,26 +344,26 @@ inline const EntityDef Redemption = {
     .name = "Redemption",
     .plural = "redemptions",
     .table = "redemption",
-    .fields = "id timestamp redeemer collateralToken parentCollectionId condition { id } indexSets payout",
+    .fields = "id timestamp redeemer collateralToken parentCollectionId condition indexSets payout",
     .ddl = R"(CREATE TABLE IF NOT EXISTS redemption (
         id VARCHAR PRIMARY KEY,
         timestamp BIGINT,
         redeemer VARCHAR,
-        collateral_token VARCHAR,
-        parent_collection_id VARCHAR,
-        condition_id VARCHAR,
-        index_sets VARCHAR,
+        collateralToken VARCHAR,
+        parentCollectionId VARCHAR,
+        condition VARCHAR,
+        indexSets VARCHAR,
         payout VARCHAR
     );
     CREATE INDEX IF NOT EXISTS idx_redemption_ts ON redemption(timestamp);
     CREATE INDEX IF NOT EXISTS idx_redemption_user ON redemption(redeemer))",
-    .columns = "id, timestamp, redeemer, collateral_token, parent_collection_id, condition_id, index_sets, payout",
+    .columns = "id, timestamp, redeemer, collateralToken, parentCollectionId, condition, indexSets, payout",
     .to_values = redemption_to_values};
 
 // ----------------------------------------------------------------------------
 // EnrichedOrderFilled - 订单成交 (orderbook 交易)
 // CSV: id,transactionHash,timestamp,maker,taker,orderHash,market,side,size,price
-// 注意: market 就是 tokenId (positionId)
+// market 就是 tokenId (positionId)
 // ----------------------------------------------------------------------------
 inline std::string enriched_order_filled_to_values(const json &j) {
   return json_str(j, "id") + "," +
@@ -385,12 +385,12 @@ inline const EntityDef EnrichedOrderFilled = {
     .fields = "id transactionHash timestamp maker { id } taker { id } orderHash market side size price",
     .ddl = R"(CREATE TABLE IF NOT EXISTS enriched_order_filled (
         id VARCHAR PRIMARY KEY,
-        transaction_hash VARCHAR,
+        transactionHash VARCHAR,
         timestamp BIGINT,
         maker VARCHAR,
         taker VARCHAR,
-        order_hash VARCHAR,
-        token_id VARCHAR,
+        orderHash VARCHAR,
+        market VARCHAR,
         side VARCHAR,
         size VARCHAR,
         price DOUBLE
@@ -398,8 +398,8 @@ inline const EntityDef EnrichedOrderFilled = {
     CREATE INDEX IF NOT EXISTS idx_eof_ts ON enriched_order_filled(timestamp);
     CREATE INDEX IF NOT EXISTS idx_eof_maker ON enriched_order_filled(maker);
     CREATE INDEX IF NOT EXISTS idx_eof_taker ON enriched_order_filled(taker);
-    CREATE INDEX IF NOT EXISTS idx_eof_token ON enriched_order_filled(token_id))",
-    .columns = "id, transaction_hash, timestamp, maker, taker, order_hash, token_id, side, size, price",
+    CREATE INDEX IF NOT EXISTS idx_eof_market ON enriched_order_filled(market))",
+    .columns = "id, transactionHash, timestamp, maker, taker, orderHash, market, side, size, price",
     .to_values = enriched_order_filled_to_values};
 
 // ============================================================================
@@ -425,11 +425,11 @@ inline const EntityDef PnlCondition = {
     .fields = "id positionIds payoutNumerators payoutDenominator",
     .ddl = R"(CREATE TABLE IF NOT EXISTS pnl_condition (
         id VARCHAR PRIMARY KEY,
-        position_ids VARCHAR,
-        payout_numerators VARCHAR,
-        payout_denominator VARCHAR
+        positionIds VARCHAR,
+        payoutNumerators VARCHAR,
+        payoutDenominator VARCHAR
     ))",
-    .columns = "id, position_ids, payout_numerators, payout_denominator",
+    .columns = "id, positionIds, payoutNumerators, payoutDenominator",
     .to_values = pnl_condition_to_values};
 
 // ============================================================================

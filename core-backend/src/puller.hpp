@@ -5,7 +5,7 @@
 // ============================================================================
 #define PARALLEL_PER_SOURCE 9999              // 每个 source 内最多并行 entity 数
 #define PARALLEL_TOTAL 9999                   // 全局最大并发请求数
-#define GRAPHQL_BATCH_SIZE 50                 // 每次请求的 limit
+#define GRAPHQL_BATCH_SIZE 1000               // 每次请求的 limit
 #define DB_FLUSH_THRESHOLD GRAPHQL_BATCH_SIZE // 累积多少条刷入 DB
 #define PULL_RETRY_DELAY_MS 10                // 初始重试延迟(ms)
 #define PULL_RETRY_MAX_DELAY_MS 100           // 最大重试延迟(ms)
