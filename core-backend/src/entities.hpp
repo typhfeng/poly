@@ -293,14 +293,15 @@ inline const EntityDef Condition = {
 // ----------------------------------------------------------------------------
 // Merge - 铸造 (用 collateral 铸造 condition 的所有 outcome tokens)
 // CSV: id,timestamp,stakeholder,collateralToken,parentCollectionId,condition,partition,amount
+// stakeholder/collateralToken/condition 是 OBJECT 类型，需要 { id }
 // ----------------------------------------------------------------------------
 inline std::string merge_to_values(const json &j) {
   return json_str(j, "id") + "," +
          json_int(j, "timestamp") + "," +
-         json_str(j, "stakeholder") + "," +
-         json_str(j, "collateralToken") + "," +
+         json_ref(j, "stakeholder") + "," +
+         json_ref(j, "collateralToken") + "," +
          json_str(j, "parentCollectionId") + "," +
-         json_str(j, "condition") + "," +
+         json_ref(j, "condition") + "," +
          json_array(j, "partition") + "," +
          json_int(j, "amount");
 }
@@ -309,7 +310,7 @@ inline const EntityDef Merge = {
     .name = "Merge",
     .plural = "merges",
     .table = "merge",
-    .fields = "id timestamp stakeholder collateralToken parentCollectionId condition partition amount",
+    .fields = "id timestamp stakeholder { id } collateralToken { id } parentCollectionId condition { id } partition amount",
     .ddl = R"(CREATE TABLE IF NOT EXISTS merge (
         id VARCHAR PRIMARY KEY,
         timestamp BIGINT,
@@ -328,14 +329,15 @@ inline const EntityDef Merge = {
 // ----------------------------------------------------------------------------
 // Redemption - 赎回 (用 outcome tokens 换回 collateral)
 // CSV: id,timestamp,redeemer,collateralToken,parentCollectionId,condition,indexSets,payout
+// redeemer/collateralToken/condition 是 OBJECT 类型，需要 { id }
 // ----------------------------------------------------------------------------
 inline std::string redemption_to_values(const json &j) {
   return json_str(j, "id") + "," +
          json_int(j, "timestamp") + "," +
-         json_str(j, "redeemer") + "," +
-         json_str(j, "collateralToken") + "," +
+         json_ref(j, "redeemer") + "," +
+         json_ref(j, "collateralToken") + "," +
          json_str(j, "parentCollectionId") + "," +
-         json_str(j, "condition") + "," +
+         json_ref(j, "condition") + "," +
          json_array(j, "indexSets") + "," +
          json_int(j, "payout");
 }
@@ -344,7 +346,7 @@ inline const EntityDef Redemption = {
     .name = "Redemption",
     .plural = "redemptions",
     .table = "redemption",
-    .fields = "id timestamp redeemer collateralToken parentCollectionId condition indexSets payout",
+    .fields = "id timestamp redeemer { id } collateralToken { id } parentCollectionId condition { id } indexSets payout",
     .ddl = R"(CREATE TABLE IF NOT EXISTS redemption (
         id VARCHAR PRIMARY KEY,
         timestamp BIGINT,
