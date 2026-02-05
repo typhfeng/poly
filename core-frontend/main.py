@@ -26,8 +26,7 @@ async def index(request: Request):
     stats = backend_get("/api/stats", default={})
     sync_state_data = backend_get("/api/sync", default=[])
     sync_state = [
-        (r.get("source"), r.get("entity"), r.get("last_id"),
-         r.get("last_sync_at"), r.get("total_synced"))
+        (r.get("source"), r.get("entity"), r.get("last_id"), r.get("last_sync_at"))
         for r in sync_state_data
     ] if isinstance(sync_state_data, list) else []
 
@@ -54,6 +53,7 @@ async def api_entity_stats():
 async def api_entity_latest(entity: str = Query(...)):
     """API: 获取某个 entity 最近一条记录（用于 hover）"""
     return backend_get("/api/entity-latest", {"entity": entity})
+
 
 @app.get("/api/indexer-fails")
 async def api_indexer_fails(source: str = Query(...), entity: str = Query(...)):
@@ -122,21 +122,6 @@ async def api_orders(
     return sql_query(sql)
 
 
-@app.get("/api/splits")
-async def api_splits(
-    stakeholder: str = Query(None), condition_id: str = Query(None),
-    limit: int = Query(100, le=1000), offset: int = Query(0)
-):
-    """查询 Split 事件"""
-    sql = "SELECT * FROM split WHERE 1=1"
-    if stakeholder:
-        sql += f" AND stakeholder = '{escape_sql(stakeholder)}'"
-    if condition_id:
-        sql += f" AND condition_id = '{escape_sql(condition_id)}'"
-    sql += f" ORDER BY timestamp DESC LIMIT {limit} OFFSET {offset}"
-    return sql_query(sql)
-
-
 @app.get("/api/merges")
 async def api_merges(
     stakeholder: str = Query(None), condition_id: str = Query(None),
@@ -189,7 +174,8 @@ def _load_export_tables():
 
 def _get_order_column(table: str) -> str:
     """获取表的排序字段：优先 timestamp 类字段，否则用 id"""
-    schema = backend_get("/api/sql", {"q": f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table}'"}, default=[])
+    schema = backend_get(
+        "/api/sql", {"q": f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table}'"}, default=[])
     cols = {r.get("column_name", "").lower() for r in schema}
     # 优先级：timestamp > creation_timestamp > last_seen_timestamp > id
     for c in ["timestamp", "creation_timestamp", "last_seen_timestamp", "last_active_day"]:

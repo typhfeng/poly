@@ -76,12 +76,15 @@ inline std::string json_decimal(const json &j, const char *key) {
   return "NULL";
 }
 
-// JSON 提取：嵌套对象的 id
+// JSON 提取：关系字段（兼容 {id:"xxx"} 和直接字符串两种格式）
 inline std::string json_ref(const json &j, const char *key) {
   if (!j.contains(key) || j[key].is_null())
     return "NULL";
   if (j[key].is_object() && j[key].contains("id")) {
     return escape_sql(j[key]["id"].get<std::string>());
+  }
+  if (j[key].is_string()) {
+    return escape_sql(j[key].get<std::string>());
   }
   return "NULL";
 }
@@ -103,7 +106,6 @@ CREATE TABLE IF NOT EXISTS sync_state (
     entity VARCHAR NOT NULL,
     last_id VARCHAR,
     last_sync_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    total_synced BIGINT DEFAULT 0,
     PRIMARY KEY (source, entity)
 ))";
 
@@ -305,40 +307,6 @@ inline const EntityDef Condition = {
     .to_values = condition_to_values};
 
 // ----------------------------------------------------------------------------
-// Split - 拆分
-// ----------------------------------------------------------------------------
-inline std::string split_to_values(const json &j) {
-  return json_str(j, "id") + "," +
-         json_int(j, "timestamp") + "," +
-         json_ref(j, "stakeholder") + "," +
-         json_ref(j, "collateralToken") + "," +
-         json_str(j, "parentCollectionId") + "," +
-         json_ref(j, "condition") + "," +
-         json_array(j, "partition") + "," +
-         json_int(j, "amount");
-}
-
-inline const EntityDef Split = {
-    .name = "Split",
-    .plural = "splits",
-    .table = "split",
-    .fields = "id timestamp stakeholder{id} collateralToken{id} parentCollectionId condition{id} partition amount",
-    .ddl = R"(CREATE TABLE IF NOT EXISTS split (
-        id VARCHAR PRIMARY KEY,
-        timestamp BIGINT,
-        stakeholder VARCHAR,
-        collateral_token VARCHAR,
-        parent_collection_id VARCHAR,
-        condition_id VARCHAR,
-        partition VARCHAR,
-        amount VARCHAR
-    );
-    CREATE INDEX IF NOT EXISTS idx_split_ts ON split(timestamp);
-    CREATE INDEX IF NOT EXISTS idx_split_user ON split(stakeholder))",
-    .columns = "id, timestamp, stakeholder, collateral_token, parent_collection_id, condition_id, partition, amount",
-    .to_values = split_to_values};
-
-// ----------------------------------------------------------------------------
 // Merge - 合并
 // ----------------------------------------------------------------------------
 inline std::string merge_to_values(const json &j) {
@@ -356,7 +324,7 @@ inline const EntityDef Merge = {
     .name = "Merge",
     .plural = "merges",
     .table = "merge",
-    .fields = "id timestamp stakeholder{id} collateralToken{id} parentCollectionId condition{id} partition amount",
+    .fields = "id timestamp stakeholder collateralToken parentCollectionId condition partition amount",
     .ddl = R"(CREATE TABLE IF NOT EXISTS merge (
         id VARCHAR PRIMARY KEY,
         timestamp BIGINT,
@@ -390,7 +358,7 @@ inline const EntityDef Redemption = {
     .name = "Redemption",
     .plural = "redemptions",
     .table = "redemption",
-    .fields = "id timestamp redeemer{id} collateralToken{id} parentCollectionId condition{id} indexSets payout",
+    .fields = "id timestamp redeemer collateralToken parentCollectionId condition indexSets payout",
     .ddl = R"(CREATE TABLE IF NOT EXISTS redemption (
         id VARCHAR PRIMARY KEY,
         timestamp BIGINT,
@@ -461,7 +429,7 @@ inline const EntityDef EnrichedOrderFilled = {
     .name = "EnrichedOrderFilled",
     .plural = "enrichedOrderFilleds",
     .table = "enriched_order_filled",
-    .fields = "id transactionHash timestamp maker{id} taker{id} orderHash market{id} side size price",
+    .fields = "id transactionHash timestamp maker taker orderHash market side size price",
     .ddl = R"(CREATE TABLE IF NOT EXISTS enriched_order_filled (
         id VARCHAR PRIMARY KEY,
         transaction_hash VARCHAR,
@@ -481,44 +449,6 @@ inline const EntityDef EnrichedOrderFilled = {
     .to_values = enriched_order_filled_to_values};
 
 // ----------------------------------------------------------------------------
-// Orderbook - 订单簿
-// ----------------------------------------------------------------------------
-inline std::string orderbook_to_values(const json &j) {
-  return json_str(j, "id") + "," +
-         json_int(j, "tradesQuantity") + "," +
-         json_int(j, "buysQuantity") + "," +
-         json_int(j, "sellsQuantity") + "," +
-         json_int(j, "collateralVolume") + "," +
-         json_decimal(j, "scaledCollateralVolume") + "," +
-         json_int(j, "collateralBuyVolume") + "," +
-         json_decimal(j, "scaledCollateralBuyVolume") + "," +
-         json_int(j, "collateralSellVolume") + "," +
-         json_decimal(j, "scaledCollateralSellVolume") + "," +
-         json_int(j, "lastActiveDay");
-}
-
-inline const EntityDef Orderbook = {
-    .name = "Orderbook",
-    .plural = "orderbooks",
-    .table = "orderbook",
-    .fields = "id tradesQuantity buysQuantity sellsQuantity collateralVolume scaledCollateralVolume collateralBuyVolume scaledCollateralBuyVolume collateralSellVolume scaledCollateralSellVolume lastActiveDay",
-    .ddl = R"(CREATE TABLE IF NOT EXISTS orderbook (
-        id VARCHAR PRIMARY KEY,
-        trades_quantity VARCHAR,
-        buys_quantity VARCHAR,
-        sells_quantity VARCHAR,
-        collateral_volume VARCHAR,
-        scaled_collateral_volume DOUBLE,
-        collateral_buy_volume VARCHAR,
-        scaled_collateral_buy_volume DOUBLE,
-        collateral_sell_volume VARCHAR,
-        scaled_collateral_sell_volume DOUBLE,
-        last_active_day BIGINT
-    ))",
-    .columns = "id, trades_quantity, buys_quantity, sells_quantity, collateral_volume, scaled_collateral_volume, collateral_buy_volume, scaled_collateral_buy_volume, collateral_sell_volume, scaled_collateral_sell_volume, last_active_day",
-    .to_values = orderbook_to_values};
-
-// ----------------------------------------------------------------------------
 // MarketData - 市场数据
 // ----------------------------------------------------------------------------
 inline std::string market_data_to_values(const json &j) {
@@ -533,7 +463,7 @@ inline const EntityDef MarketData = {
     .name = "MarketData",
     .plural = "marketDatas",
     .table = "market_data",
-    .fields = "id condition{id} outcomeIndex fpmm{id} priceOrderbook",
+    .fields = "id condition outcomeIndex fpmm priceOrderbook",
     .ddl = R"(CREATE TABLE IF NOT EXISTS market_data (
         id VARCHAR PRIMARY KEY,
         condition_id VARCHAR,
@@ -544,181 +474,6 @@ inline const EntityDef MarketData = {
     CREATE INDEX IF NOT EXISTS idx_md_cond ON market_data(condition_id))",
     .columns = "id, condition_id, outcome_index, fpmm_id, price_orderbook",
     .to_values = market_data_to_values};
-
-// ----------------------------------------------------------------------------
-// MarketPosition - 市场持仓
-// ----------------------------------------------------------------------------
-inline std::string market_position_to_values(const json &j) {
-  return json_str(j, "id") + "," +
-         json_ref(j, "market") + "," +
-         json_ref(j, "user") + "," +
-         json_int(j, "quantityBought") + "," +
-         json_int(j, "quantitySold") + "," +
-         json_int(j, "netQuantity") + "," +
-         json_int(j, "valueBought") + "," +
-         json_int(j, "valueSold") + "," +
-         json_int(j, "netValue") + "," +
-         json_int(j, "feesPaid");
-}
-
-inline const EntityDef MarketPosition = {
-    .name = "MarketPosition",
-    .plural = "marketPositions",
-    .table = "market_position",
-    .fields = "id market{id} user{id} quantityBought quantitySold netQuantity valueBought valueSold netValue feesPaid",
-    .ddl = R"(CREATE TABLE IF NOT EXISTS market_position (
-        id VARCHAR PRIMARY KEY,
-        market_id VARCHAR,
-        user_id VARCHAR,
-        quantity_bought VARCHAR,
-        quantity_sold VARCHAR,
-        net_quantity VARCHAR,
-        value_bought VARCHAR,
-        value_sold VARCHAR,
-        net_value VARCHAR,
-        fees_paid VARCHAR
-    );
-    CREATE INDEX IF NOT EXISTS idx_mp_user ON market_position(user_id);
-    CREATE INDEX IF NOT EXISTS idx_mp_market ON market_position(market_id))",
-    .columns = "id, market_id, user_id, quantity_bought, quantity_sold, net_quantity, value_bought, value_sold, net_value, fees_paid",
-    .to_values = market_position_to_values};
-
-// ----------------------------------------------------------------------------
-// MarketProfit - 市场盈亏
-// ----------------------------------------------------------------------------
-inline std::string market_profit_to_values(const json &j) {
-  return json_str(j, "id") + "," +
-         json_ref(j, "user") + "," +
-         json_ref(j, "condition") + "," +
-         json_int(j, "profit") + "," +
-         json_decimal(j, "scaledProfit");
-}
-
-inline const EntityDef MarketProfit = {
-    .name = "MarketProfit",
-    .plural = "marketProfits",
-    .table = "market_profit",
-    .fields = "id user{id} condition{id} profit scaledProfit",
-    .ddl = R"(CREATE TABLE IF NOT EXISTS market_profit (
-        id VARCHAR PRIMARY KEY,
-        user_id VARCHAR,
-        condition_id VARCHAR,
-        profit VARCHAR,
-        scaled_profit DOUBLE
-    );
-    CREATE INDEX IF NOT EXISTS idx_mprofit_user ON market_profit(user_id))",
-    .columns = "id, user_id, condition_id, profit, scaled_profit",
-    .to_values = market_profit_to_values};
-
-// ----------------------------------------------------------------------------
-// FixedProductMarketMaker - FPMM 做市商
-// ----------------------------------------------------------------------------
-inline std::string fpmm_to_values(const json &j) {
-  return json_str(j, "id") + "," +
-         json_str(j, "creator") + "," +
-         json_int(j, "creationTimestamp") + "," +
-         json_str(j, "creationTransactionHash") + "," +
-         json_ref(j, "collateralToken") + "," +
-         json_str(j, "conditionalTokenAddress") + "," +
-         json_array(j, "conditions") + "," +
-         json_int(j, "fee") + "," +
-         json_int(j, "tradesQuantity") + "," +
-         json_int(j, "buysQuantity") + "," +
-         json_int(j, "sellsQuantity") + "," +
-         json_int(j, "liquidityAddQuantity") + "," +
-         json_int(j, "liquidityRemoveQuantity") + "," +
-         json_int(j, "collateralVolume") + "," +
-         json_decimal(j, "scaledCollateralVolume") + "," +
-         json_int(j, "collateralBuyVolume") + "," +
-         json_decimal(j, "scaledCollateralBuyVolume") + "," +
-         json_int(j, "collateralSellVolume") + "," +
-         json_decimal(j, "scaledCollateralSellVolume") + "," +
-         json_int(j, "feeVolume") + "," +
-         json_decimal(j, "scaledFeeVolume") + "," +
-         json_int(j, "liquidityParameter") + "," +
-         json_decimal(j, "scaledLiquidityParameter") + "," +
-         json_array(j, "outcomeTokenAmounts") + "," +
-         json_array(j, "outcomeTokenPrices") + "," +
-         json_int(j, "outcomeSlotCount") + "," +
-         json_int(j, "lastActiveDay") + "," +
-         json_int(j, "totalSupply");
-}
-
-inline const EntityDef FixedProductMarketMaker = {
-    .name = "FixedProductMarketMaker",
-    .plural = "fixedProductMarketMakers",
-    .table = "fpmm",
-    .fields = "id creator creationTimestamp creationTransactionHash collateralToken{id} conditionalTokenAddress conditions fee tradesQuantity buysQuantity sellsQuantity liquidityAddQuantity liquidityRemoveQuantity collateralVolume scaledCollateralVolume collateralBuyVolume scaledCollateralBuyVolume collateralSellVolume scaledCollateralSellVolume feeVolume scaledFeeVolume liquidityParameter scaledLiquidityParameter outcomeTokenAmounts outcomeTokenPrices outcomeSlotCount lastActiveDay totalSupply",
-    .ddl = R"(CREATE TABLE IF NOT EXISTS fpmm (
-        id VARCHAR PRIMARY KEY,
-        creator VARCHAR,
-        creation_timestamp BIGINT,
-        creation_transaction_hash VARCHAR,
-        collateral_token VARCHAR,
-        conditional_token_address VARCHAR,
-        conditions VARCHAR,
-        fee VARCHAR,
-        trades_quantity VARCHAR,
-        buys_quantity VARCHAR,
-        sells_quantity VARCHAR,
-        liquidity_add_quantity VARCHAR,
-        liquidity_remove_quantity VARCHAR,
-        collateral_volume VARCHAR,
-        scaled_collateral_volume DOUBLE,
-        collateral_buy_volume VARCHAR,
-        scaled_collateral_buy_volume DOUBLE,
-        collateral_sell_volume VARCHAR,
-        scaled_collateral_sell_volume DOUBLE,
-        fee_volume VARCHAR,
-        scaled_fee_volume DOUBLE,
-        liquidity_parameter VARCHAR,
-        scaled_liquidity_parameter DOUBLE,
-        outcome_token_amounts VARCHAR,
-        outcome_token_prices VARCHAR,
-        outcome_slot_count INT,
-        last_active_day BIGINT,
-        total_supply VARCHAR
-    );
-    CREATE INDEX IF NOT EXISTS idx_fpmm_creator ON fpmm(creator))",
-    .columns = "id, creator, creation_timestamp, creation_transaction_hash, collateral_token, conditional_token_address, conditions, fee, trades_quantity, buys_quantity, sells_quantity, liquidity_add_quantity, liquidity_remove_quantity, collateral_volume, scaled_collateral_volume, collateral_buy_volume, scaled_collateral_buy_volume, collateral_sell_volume, scaled_collateral_sell_volume, fee_volume, scaled_fee_volume, liquidity_parameter, scaled_liquidity_parameter, outcome_token_amounts, outcome_token_prices, outcome_slot_count, last_active_day, total_supply",
-    .to_values = fpmm_to_values};
-
-// ----------------------------------------------------------------------------
-// Transaction - FPMM 交易
-// ----------------------------------------------------------------------------
-inline std::string transaction_to_values(const json &j) {
-  return json_str(j, "id") + "," +
-         json_str(j, "type") + "," +
-         json_int(j, "timestamp") + "," +
-         json_ref(j, "market") + "," +
-         json_ref(j, "user") + "," +
-         json_int(j, "tradeAmount") + "," +
-         json_int(j, "feeAmount") + "," +
-         json_int(j, "outcomeIndex") + "," +
-         json_int(j, "outcomeTokensAmount");
-}
-
-inline const EntityDef Transaction = {
-    .name = "Transaction",
-    .plural = "transactions",
-    .table = "fpmm_transaction",
-    .fields = "id type timestamp market{id} user{id} tradeAmount feeAmount outcomeIndex outcomeTokensAmount",
-    .ddl = R"(CREATE TABLE IF NOT EXISTS fpmm_transaction (
-        id VARCHAR PRIMARY KEY,
-        type VARCHAR,
-        timestamp BIGINT,
-        market_id VARCHAR,
-        user_id VARCHAR,
-        trade_amount VARCHAR,
-        fee_amount VARCHAR,
-        outcome_index INT,
-        outcome_tokens_amount VARCHAR
-    );
-    CREATE INDEX IF NOT EXISTS idx_ftx_ts ON fpmm_transaction(timestamp);
-    CREATE INDEX IF NOT EXISTS idx_ftx_user ON fpmm_transaction(user_id);
-    CREATE INDEX IF NOT EXISTS idx_ftx_market ON fpmm_transaction(market_id))",
-    .columns = "id, type, timestamp, market_id, user_id, trade_amount, fee_amount, outcome_index, outcome_tokens_amount",
-    .to_values = transaction_to_values};
 
 // ----------------------------------------------------------------------------
 // Global - 全局统计
@@ -874,10 +629,9 @@ inline const EntityDef PnlFPMM = {
 // ============================================================================
 
 inline const EntityDef *MAIN_ENTITIES[] = {
-    &Condition, &Split, &Merge, &Redemption,
-    &Account, &EnrichedOrderFilled, &Orderbook,
-    &MarketData, &MarketPosition, &MarketProfit,
-    &FixedProductMarketMaker, &Transaction, &Global};
+    &Condition, &Merge, &Redemption,
+    &Account, &EnrichedOrderFilled,
+    &MarketData, &Global};
 inline constexpr size_t MAIN_ENTITY_COUNT = sizeof(MAIN_ENTITIES) / sizeof(MAIN_ENTITIES[0]);
 
 inline const EntityDef *PNL_ENTITIES[] = {

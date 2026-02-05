@@ -292,13 +292,6 @@ SELECT * FROM user_position LIMIT 10</textarea
           <a
             href="#"
             onclick="
-              setSQL('SELECT * FROM split ORDER BY timestamp DESC LIMIT 20')
-            "
-            >最新 Split</a
-          >
-          <a
-            href="#"
-            onclick="
               setSQL(
                 'SELECT COUNT(*) as cnt, maker FROM enriched_order_filled GROUP BY maker ORDER BY cnt DESC LIMIT 20',
               )

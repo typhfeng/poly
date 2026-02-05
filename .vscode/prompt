@@ -1,0 +1,7 @@
+/home/chuyin/work/poly/doc/indexer/the graph/official
+考虑一下graph节点实现(和implemented的基本完全相同)
+IPFS manifest: /home/chuyin/work/poly/doc/indexer/the graph/implemented
+合约节点本身的实现: /home/chuyin/work/poly/doc/smart-contracts
+sync到本地的样本示例: /home/chuyin/work/poly/data/export
+
+我们的目的是全量重建整个polymart的所有历史用户的所有交易记录, 持仓详情, 净值

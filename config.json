@@ -9,17 +9,11 @@
       "enabled": true,
       "entities": {
         "Condition": "condition",
-        "Split": "split",
         "Merge": "merge",
         "Redemption": "redemption",
         "Account": "account",
         "EnrichedOrderFilled": "enriched_order_filled",
-        "Orderbook": "orderbook",
         "MarketData": "market_data",
-        "MarketPosition": "market_position",
-        "MarketProfit": "market_profit",
-        "FixedProductMarketMaker": "fpmm",
-        "Transaction": "fpmm_transaction",
         "Global": "global"
       }
     },

@@ -781,13 +781,13 @@
       const resp = await fetch(`/api/export?limit=${limit}`);
       const data = await resp.json();
       if (data.error) {
-        statusMsg.textContent = "导出失败（请关闭编辑器中的csv文件）";
+        statusMsg.textContent = "导出失败";
       } else {
         statusMsg.textContent = `导出完成: ${data.exported_tables} 表, 每表最多 ${limit} 条`;
         setTimeout(() => { statusMsg.textContent = ""; }, 3000);
       }
     } catch (e) {
-      statusMsg.textContent = "导出失败（请关闭编辑器中的csv文件）";
+      statusMsg.textContent = "导出失败";
     } finally {
       btn.disabled = false;
       btn.textContent = "导出";

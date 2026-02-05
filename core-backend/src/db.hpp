@@ -2,11 +2,9 @@
 
 #include "entities.hpp"
 #include <cassert>
-#include <chrono>
 #include <duckdb.hpp>
 #include <nlohmann/json.hpp>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 using json = nlohmann::json;
@@ -15,8 +13,8 @@ class Database {
 public:
   explicit Database(const std::string &path) {
     db_ = std::make_unique<duckdb::DuckDB>(path);
-    conn_ = std::make_unique<duckdb::Connection>(*db_);      // 写连接
-    read_conn_ = std::make_unique<duckdb::Connection>(*db_); // 读连接
+    conn_ = std::make_unique<duckdb::Connection>(*db_);
+    read_conn_ = std::make_unique<duckdb::Connection>(*db_);
   }
 
   // 表初始化
@@ -25,101 +23,54 @@ public:
     execute(entities::ENTITY_STATS_META_DDL);
     execute(entities::INDEXER_FAIL_META_DDL);
   }
-  void init_entity(const entities::EntityDef *entity) { execute(entity->ddl); }
 
-  // 事务
-  void begin_transaction() {
-    auto result = conn_->Query("BEGIN TRANSACTION");
-    assert(!result->HasError() && "BEGIN TRANSACTION failed");
-  }
-  void commit() {
-    auto result = conn_->Query("COMMIT");
-    assert(!result->HasError() && "COMMIT failed");
-  }
+  void init_entity(const entities::EntityDef *entity) { execute(entity->ddl); }
 
   // 游标管理
   std::string get_cursor(const std::string &source, const std::string &entity) {
-    return get_sync_field<std::string>(source, entity, "last_id", "");
-  }
-
-  int64_t get_total_synced(const std::string &source, const std::string &entity) {
-    return get_sync_field<int64_t>(source, entity, "total_synced", 0);
-  }
-
-  void save_cursor_total(const std::string &source, const std::string &entity,
-                         const std::string &last_id, int64_t total_synced) {
-    std::string sql =
-        "INSERT OR REPLACE INTO sync_state (source, entity, last_id, last_sync_at, total_synced) "
-        "VALUES (" +
-        entities::escape_sql(source) + ", " +
-        entities::escape_sql(entity) + ", " +
-        entities::escape_sql(last_id) + ", CURRENT_TIMESTAMP, " +
-        std::to_string(total_synced) + ")";
-    auto result = conn_->Query(sql);
-    assert(!result->HasError() && "save_cursor failed");
-  }
-
-private:
-  template <typename T>
-  T get_sync_field(const std::string &source, const std::string &entity,
-                   const char *field, T default_val) {
-    std::string sql = "SELECT " + std::string(field) + " FROM sync_state WHERE source = '" +
+    std::string sql = "SELECT last_id FROM sync_state WHERE source = '" +
                       entities::escape_sql_raw(source) + "' AND entity = '" +
                       entities::escape_sql_raw(entity) + "'";
     auto result = conn_->Query(sql);
     if (result->RowCount() == 0)
-      return default_val;
+      return "";
     auto value = result->GetValue(0, 0);
-    if (value.IsNull())
-      return default_val;
-    if constexpr (std::is_same_v<T, std::string>)
-      return value.ToString();
-    else
-      return value.GetValue<T>();
+    return value.IsNull() ? "" : value.ToString();
   }
 
-public:
-  // 批量操作
-  void batch_insert(const std::string &table, const std::string &columns,
-                    const std::vector<std::string> &values_list) {
-    if (values_list.empty())
-      return;
-    std::string sql = "INSERT OR REPLACE INTO " + table + " (" + columns + ") VALUES ";
-    for (size_t i = 0; i < values_list.size(); ++i) {
-      if (i > 0)
-        sql += ", ";
-      sql += "(" + values_list[i] + ")";
-    }
-    auto result = conn_->Query(sql);
-    assert(!result->HasError() && "batch_insert failed");
-  }
-
-  // sync_state 按时间节流，允许丢最近几秒
-  void atomic_insert_and_save_cursor(
+  // 原子写入：数据 + cursor 在同一事务
+  void atomic_insert_with_cursor(
       const std::string &table, const std::string &columns,
       const std::vector<std::string> &values_list,
-      const std::string &source, const std::string &entity, const std::string &cursor,
-      bool force_save_cursor = false) {
-    auto &m = cursor_meta_[source + "/" + entity];
-    if (!m.inited) {
-      m.total_synced = get_total_synced(source, entity);
-      m.inited = true;
-      m.last_save = std::chrono::steady_clock::now();
+      const std::string &source, const std::string &entity,
+      const std::string &cursor) {
+    assert(!values_list.empty());
+    assert(!cursor.empty());
+
+    // 构建 batch insert SQL
+    std::string insert_sql = "INSERT OR REPLACE INTO " + table + " (" + columns + ") VALUES ";
+    for (size_t i = 0; i < values_list.size(); ++i) {
+      if (i > 0)
+        insert_sql += ", ";
+      insert_sql += "(" + values_list[i] + ")";
     }
 
-    m.total_synced += static_cast<int64_t>(values_list.size());
-    if (!cursor.empty())
-      m.last_cursor = cursor;
+    // 构建 cursor update SQL
+    std::string cursor_sql =
+        "INSERT OR REPLACE INTO sync_state (source, entity, last_id, last_sync_at) VALUES (" +
+        entities::escape_sql(source) + ", " +
+        entities::escape_sql(entity) + ", " +
+        entities::escape_sql(cursor) + ", CURRENT_TIMESTAMP)";
 
-    begin_transaction();
-    batch_insert(table, columns, values_list);
-
-    auto now = std::chrono::steady_clock::now();
-    if (force_save_cursor || (now - m.last_save) >= kCursorPersistInterval) {
-      save_cursor_total(source, entity, m.last_cursor, m.total_synced);
-      m.last_save = now;
-    }
-    commit();
+    // 单事务执行
+    auto r1 = conn_->Query("BEGIN TRANSACTION");
+    assert(!r1->HasError());
+    auto r2 = conn_->Query(insert_sql);
+    assert(!r2->HasError());
+    auto r3 = conn_->Query(cursor_sql);
+    assert(!r3->HasError());
+    auto r4 = conn_->Query("COMMIT");
+    assert(!r4->HasError());
   }
 
   void execute(const std::string &sql) {
@@ -152,7 +103,6 @@ public:
         if (value.IsNull()) {
           obj[names[col]] = nullptr;
         } else {
-          // 根据类型转换
           switch (types[col].id()) {
           case duckdb::LogicalTypeId::BOOLEAN:
             obj[names[col]] = value.GetValue<bool>();
@@ -177,21 +127,11 @@ public:
       }
       rows.push_back(std::move(obj));
     }
-
     return rows;
   }
 
 private:
   std::unique_ptr<duckdb::DuckDB> db_;
-  std::unique_ptr<duckdb::Connection> conn_;      // 写连接
-  std::unique_ptr<duckdb::Connection> read_conn_; // 读连接
-
-  struct CursorMeta {
-    bool inited = false;
-    int64_t total_synced = 0;
-    std::string last_cursor;
-    std::chrono::steady_clock::time_point last_save{};
-  };
-  std::unordered_map<std::string, CursorMeta> cursor_meta_;
-  static constexpr auto kCursorPersistInterval = std::chrono::seconds(5);
+  std::unique_ptr<duckdb::Connection> conn_;
+  std::unique_ptr<duckdb::Connection> read_conn_;
 };

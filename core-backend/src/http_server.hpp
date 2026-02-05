@@ -145,17 +145,11 @@ private:
 
   void handle_sync_state() {
     res_.set(http::field::content_type, "application/json");
-
-    try {
-      json result = db_.query_json(
-          "SELECT source, entity, last_id, last_sync_at, total_synced "
-          "FROM sync_state ORDER BY last_sync_at DESC");
-      res_.result(http::status::ok);
-      res_.body() = result.dump();
-    } catch (const std::exception &e) {
-      res_.result(http::status::internal_server_error);
-      res_.body() = json{{"error", e.what()}}.dump();
-    }
+    json result = db_.query_json(
+        "SELECT source, entity, last_id, last_sync_at "
+        "FROM sync_state ORDER BY last_sync_at DESC");
+    res_.result(http::status::ok);
+    res_.body() = result.dump();
   }
 
   void handle_entity_stats() {
