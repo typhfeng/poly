@@ -76,9 +76,15 @@ def main():
     
     def cleanup(signum=None, frame=None):
         print("\n[run.py] 正在关闭...")
-        for p in processes:
+        # 先杀 frontend 再杀 backend，避免 frontend 请求已死的 backend 报错
+        for p in reversed(processes):
             if p.poll() is None:
                 p.terminate()
+        for p in processes:
+            try:
+                p.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                p.kill()
         sys.exit(0)
     
     signal.signal(signal.SIGINT, cleanup)
