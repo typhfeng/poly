@@ -112,15 +112,11 @@ def sql_query(sql: str):
     return backend_get("/api/sql", {"q": sql})
 
 
-# 长超时客户端(用于导出)
-_export_client = httpx.Client(timeout=300, trust_env=False)
-
-
 @app.get("/api/export")
 async def api_export(limit: int = Query(100, le=1000), order: str = Query("desc")):
-    """从 indexer 拉取原始数据导出(调用 C++ 后端并行实现)
+    """从本地 DB 导出 entity 数据到 CSV
     order: desc=最新数据, asc=最早数据
     """
-    resp = _export_client.get(
+    resp = _client.get(
         f"{BACKEND_API}/api/export-raw", params={"limit": limit, "order": order})
     return resp.json()

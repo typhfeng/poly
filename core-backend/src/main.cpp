@@ -45,7 +45,7 @@ int main(int argc, char *argv[]) {
   HttpsPool pool(ioc, config.api_key);
 
   // HTTP 服务器(查询 API + 导出 API)
-  HttpServer http_server(ioc, db, pool, config, 8001);
+  HttpServer http_server(ioc, db, 8001);
 
   // 数据拉取
   Puller puller(config, db, pool);

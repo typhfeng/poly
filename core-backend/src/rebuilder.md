@@ -2,114 +2,35 @@
 
 ## 核心表
 
-### condition — 市场条件 (状态表，会更新)
+| Entity                        | Graph            | 必要字段                                                                                                   | 额外字段                 | 类型 | 小sync                                                                                                  | 大sync                                               |
+| ----------------------------- | ---------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------ | ---- | ------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| Condition                     | Polymarket       | id(hashID), questionId, resolutionTimestamp, payoutNumerators, payoutDenominator, outcomeSlotCount, oracle | positionIds(N * tokenID) | 状态 | `orderBy: resolutionTimestamp asc, where: {resolutionTimestamp_gte}` + skip, 记录最新非null时间戳，增量 | 删除null timestamp部分，重新全量拉                   |
+| Condition(创建一次, 后续删除) | Profit and Loss  | id(hashID), positionIds(N * tokenID)                                                                       |                          | 状态 | `orderBy: id asc, where: {id_gt}`，不需要skip因为没有timestamp的alise, 全量拉一次后删除不再sync         | loop over positionIds为null的Condition, 按hashID查补 |
+| EnrichedOrderFilled           | Polymarket       | timestamp, maker.id(usrID), taker.id(usrID), market.id(tokenID), side, size(1e6$), price(0~1)              |                          | 事件 | `orderBy: timestamp asc, where: {timestamp_gte}` + skip                                                 | -                                                    |
+| Split                         | Activity Polygon | timestamp, stakeholder(usrID), condition(questionID), amount(1e6$)                                         |                          | 事件 | `orderBy: timestamp asc, where: {timestamp_gte}` + skip                                                 | -                                                    |
+| Merge                         | Activity Polygon | timestamp, stakeholder(usrID), condition(questionID), amount(1e6$)                                         |                          | 事件 | `orderBy: timestamp asc, where: {timestamp_gte}` + skip                                                 | -                                                    |
+| Redemption                    | Activity Polygon | timestamp, redeemer(usrID), condition(questionID), indexSets("1":yes清零;"2":no清零), payout(1e6$)         |                          | 事件 | `orderBy: timestamp asc, where: {timestamp_gte}` + skip                                                 | -                                                    |
 
-| 字段                     | 类型    | Rebuild | 含义                            |
-| ------------------------ | ------- | ------- | ------------------------------- |
-| id                       | VARCHAR | ✅      | conditionId，预测问题的唯一标识 |
-| oracle                   | VARCHAR |         | 预言机地址                      |
-| questionId               | VARCHAR |         | 问题ID                          |
-| outcomeSlotCount         | INT     |         | outcome数量，通常是2            |
-| resolutionTimestamp      | BIGINT  |         | 结算时间戳                      |
-| payouts                  | JSON    |         | 结算比例(带格式)                |
-| payoutNumerators         | JSON    | ✅      | 结算比例分子，如 `["1","0"]`    |
-| payoutDenominator        | VARCHAR | ✅      | 结算比例分母                    |
-| fixedProductMarketMakers | VARCHAR |         | AMM地址                         |
-| resolutionHash           | VARCHAR |         | 结算哈希                        |
+注意同时要支持:
+    1. 历史markets/questions总和在50W个(10min sync一遍)
+    2. 单问题多选项(outcomeSlotCount > 2)
+    3. 多问题相关(NegRisk)
 
-**Corner Cases**:
-
-- `resolutionTimestamp, payouts, payoutNumerators, payoutDenominator 等为 null` → **未结算**，市场进行中
-
----
-
-### pnl_condition — 条件配置 (状态表，会更新)
-
-| 字段              | 类型    | Rebuild | 含义                                              |
-| ----------------- | ------- | ------- | ------------------------------------------------- |
-| id                | VARCHAR | ✅      | conditionId，预测问题的唯一标识                   |
-| positionIds       | JSON    | ✅      | `[YES_token, NO_token]`，两个 outcome token 的 ID |
-| payoutNumerators  | JSON    | ✅      | 结算比例分子，如 `["1","0"]`                      |
-| payoutDenominator | VARCHAR | ✅      | 结算比例分母                                      |
-
-**Corner Cases**:
-
-- `payoutNumerators=[], payoutDenominator=0` → **未结算**，市场进行中
-- `payoutNumerators=["1","0"], payoutDenominator=1` → **YES 赢**，YES=$1, NO=$0
-- `payoutNumerators=["0","1"], payoutDenominator=1` → **NO 赢**，YES=$0, NO=$1
-- `payoutNumerators=["1000000","0"], payoutDenominator=1000000` → 等价于 YES 赢(需要除以分母)
+小sync(自动更新):
+    1. 每个entity按照自己的orderBy + skip 正常sync
+    2. 注意:
+       1. Condition(Polymarket)的null timestamp部分不全
+       2. Condition(Profit and Loss)里所有数据都不全(因为是hash index)
+大sync(UI手动触发)
+    1. 更新索引服务器索引信息
+    2. 需要小sync已经完成
+    3. 删除Condition(Polymarket)的null timestamp部分, 重新拉取
+    4. 如果Condition(Profit and Loss)还存在:
+       1. loop over hashID, 把positionIds填入Condition(Polymarket)的positionIds
+       2. 删除Condition(Profit and Loss), 并且以后不再创建
+    5. 按需loop over Condition(Polymarket) 的 的positionIds 仍为null的row, query Condition(Profit and Loss)拉取
 
 ---
-
-### enriched_order_filled — 订单成交 (事件日志，不变)
-
-| 字段            | 类型    | Rebuild | 含义                                                |
-| --------------- | ------- | ------- | --------------------------------------------------- |
-| id              | VARCHAR |         | txHash_orderHash 组合                               |
-| transactionHash | VARCHAR |         | 交易哈希                                            |
-| timestamp       | BIGINT  | ✅      | Unix 时间戳                                         |
-| maker           | VARCHAR | ✅      | 挂单方地址                                          |
-| taker           | VARCHAR | ✅      | 吃单方地址                                          |
-| orderHash       | VARCHAR |         | 订单哈希                                            |
-| market          | VARCHAR | ✅      | **token ID (positionId)**，不是 conditionId！       |
-| side            | VARCHAR | ✅      | **maker 的方向**：`Buy`=maker买入, `Sell`=maker卖出 |
-| size            | VARCHAR | ✅      | 数量，单位 1e-6。`39600000` = 39.6 个 token         |
-| price           | DOUBLE  | ✅      | 价格，0-1 之间。`0.22` = $0.22                      |
-
-**Corner Cases**:
-
-- `side` 是 **maker 的方向**，taker 方向相反
-- `price` 可能有很多小数位(如 `0.1269999908496892883532907019005015`)
-- 同一笔交易可能产生多条记录(多个 maker 撮合)
-
----
-
-### merge — 铸造 (事件日志，不变)
-
-| 字段               | 类型    | Rebuild | 含义                                   |
-| ------------------ | ------- | ------- | -------------------------------------- |
-| id                 | VARCHAR |         | 交易哈希                               |
-| timestamp          | BIGINT  | ✅      | Unix 时间戳                            |
-| stakeholder        | VARCHAR | ✅      | 用户地址                               |
-| collateralToken    | VARCHAR |         | 抵押品地址 (USDC)                      |
-| parentCollectionId | VARCHAR |         | 通常是 0x000...000                     |
-| condition          | VARCHAR | ✅      | conditionId                            |
-| partition          | JSON    |         | 分区，通常是 `["1","2"]`               |
-| amount             | VARCHAR | ✅      | USDC 数量，单位 1e-6。`31000000` = $31 |
-
-**业务含义**: 用户花 $X 铸造 X 个 YES + X 个 NO(等价于各 $0.50 买入)
-
-**Corner Cases**:
-
-- `collateralToken` 有两种：
-  - `0x2791bca1f2de4661ed88a30c99a7a9449aa84174` — **USDC.e**(Bridged USDC，通过桥从以太坊转过来)
-  - `0x3a3bd7bb9528e159577f7c2e685cc81a765002e2` — **Native USDC**(Circle 在 Polygon 原生发行)
-- `partition` 固定是 `["1","2"]`
-
----
-
-### redemption — 赎回 (事件日志，不变)
-
-| 字段               | 类型    | Rebuild | 含义                       |
-| ------------------ | ------- | ------- | -------------------------- |
-| id                 | VARCHAR |         | 交易哈希                   |
-| timestamp          | BIGINT  | ✅      | Unix 时间戳                |
-| redeemer           | VARCHAR | ✅      | 用户地址                   |
-| collateralToken    | VARCHAR |         | 抵押品地址 (USDC)          |
-| parentCollectionId | VARCHAR |         | 通常是 0x000...000         |
-| condition          | VARCHAR | ✅      | conditionId                |
-| indexSets          | JSON    |         | 赎回的 outcome 集合        |
-| payout             | VARCHAR | ✅      | 实际收到的 USDC，单位 1e-6 |
-
-**业务含义**: 市场结算后，用户用 tokens 换回 USDC
-
-**Corner Cases**:
-
-- `payout=0` → 用户押的一方输了，tokens 归零
-- `indexSets=["1"]` → 只赎回一个 outcome(部分赎回)
-- `indexSets=["1","2"]` → 赎回两个 outcome(常见)
-- rebuild 时 payout 不直接使用，而是根据持仓量 × payout_price 计算
-
 **Split/Merge/Redemption 使用场景**:
 
 1. **Split(铸造)— 市场进行中**

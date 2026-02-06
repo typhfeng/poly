@@ -5,6 +5,7 @@
 // ============================================================================
 
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -14,9 +15,7 @@
 #include <nlohmann/json.hpp>
 
 #include "db.hpp"
-#include "entities.hpp"
 #include "entity_stats.hpp"
-#include "introspector.hpp"
 #include "rebuilder.hpp"
 
 namespace fs = std::filesystem;
@@ -26,18 +25,13 @@ namespace http = beast::http;
 using tcp = asio::ip::tcp;
 using json = nlohmann::json;
 
-// 前向声明
-class HttpServer;
-
 // ============================================================================
 // HTTP Session
 // ============================================================================
 class HttpSession : public std::enable_shared_from_this<HttpSession> {
 public:
-  HttpSession(tcp::socket socket, Database &db, rebuilder::Rebuilder &rebuilder,
-              HttpsPool &pool, const Config &config, const std::string &export_dir)
-      : socket_(std::move(socket)), db_(db), rebuilder_(rebuilder),
-        pool_(pool), config_(config), export_dir_(export_dir) {}
+  HttpSession(tcp::socket socket, Database &db, rebuilder::Rebuilder &rebuilder)
+      : socket_(std::move(socket)), db_(db), rebuilder_(rebuilder) {}
 
   void run() {
     do_read();
@@ -94,7 +88,6 @@ private:
         handle_rebuild_user();
       } else if (target.starts_with("/api/export-raw")) {
         handle_export_raw();
-        return;  // async handler, do_write() called in callback
       } else {
         res_.result(http::status::not_found);
         res_.set(http::field::content_type, "application/json");
@@ -287,58 +280,103 @@ private:
     if (limit > 1000)
       limit = 1000;
 
-    // order=desc(默认,最新数据) 或 order=asc(最早数据)
     std::string order_str = get_param("order");
-    bool order_desc = (order_str != "asc");
+    std::string order_dir = (order_str == "asc") ? "ASC" : "DESC";
 
-    // 创建 introspector 并启动导出
-    auto intro = std::make_shared<introspector::Introspector>(pool_, config_);
-    intro->start(export_dir_, limit, order_desc);
+    std::string export_dir = fs::current_path().string() + "/data/export";
+    fs::create_directories(export_dir);
 
-    // 异步等待完成(通过定时器轮询)
-    auto self = shared_from_this();
-    auto timer = std::make_shared<asio::steady_timer>(socket_.get_executor());
+    json j_results = json::object();
+    int ok_count = 0;
 
-    auto check_done = std::make_shared<std::function<void()>>();
-    *check_done = [this, self, intro, timer, check_done]() mutable {
-      if (intro->is_done()) {
-        const auto &results = intro->get_results();
-        json j_results = json::object();
-        int ok_count = 0;
-        for (const auto &r : results) {
-          std::string key = r.source + "/" + r.entity;
-          if (r.error.empty()) {
-            j_results[key] = {{"ok", r.rows}};
-            if (r.rows > 0)
-              ++ok_count;
-          } else {
-            j_results[key] = {{"error", r.error}};
+    auto parse_columns = [](const char *columns) {
+      std::vector<std::string> names;
+      std::string cols = columns;
+      size_t pos = 0;
+      while (pos < cols.size()) {
+        size_t comma = cols.find(',', pos);
+        std::string col = (comma == std::string::npos)
+                              ? cols.substr(pos)
+                              : cols.substr(pos, comma - pos);
+        size_t b = col.find_first_not_of(" ");
+        size_t e = col.find_last_not_of(" ");
+        if (b != std::string::npos)
+          names.push_back(col.substr(b, e - b + 1));
+        pos = (comma == std::string::npos) ? cols.size() : comma + 1;
+      }
+      return names;
+    };
+
+    auto export_entities = [&](const entities::EntityDef *const *list, size_t count) {
+      for (size_t i = 0; i < count; ++i) {
+        const auto *e = list[i];
+        std::string table = e->table;
+        std::string sql = "SELECT " + std::string(e->columns) + " FROM " + table +
+                          " ORDER BY id " + order_dir + " LIMIT " + std::to_string(limit);
+
+        json rows = db_.query_json(sql);
+        auto col_names = parse_columns(e->columns);
+
+        std::string path = export_dir + "/" + table + ".csv";
+        std::ofstream ofs(path);
+        assert(ofs.is_open());
+
+        // header
+        for (size_t k = 0; k < col_names.size(); ++k) {
+          if (k > 0)
+            ofs << ",";
+          ofs << col_names[k];
+        }
+        ofs << "\n";
+
+        // rows
+        for (const auto &row : rows) {
+          for (size_t k = 0; k < col_names.size(); ++k) {
+            if (k > 0)
+              ofs << ",";
+            if (!row.contains(col_names[k]) || row[col_names[k]].is_null())
+              continue;
+            const auto &v = row[col_names[k]];
+            if (v.is_string())
+              ofs << escape_csv(v.get<std::string>());
+            else
+              ofs << v.dump();
           }
+          ofs << "\n";
         }
 
-        res_.result(http::status::ok);
-        res_.body() = json{
-            {"path", export_dir_},
-            {"exported_tables", ok_count},
-            {"results", j_results}}
-                          .dump();
-        res_.prepare_payload();
-        do_write();
-
-        // 打破循环引用
-        *check_done = nullptr;
-      } else {
-        timer->expires_after(std::chrono::milliseconds(100));
-        timer->async_wait([check_done](boost::system::error_code) {
-          if (*check_done) (*check_done)();
-        });
+        int row_count = static_cast<int>(rows.size());
+        j_results[table] = {{"ok", row_count}};
+        if (row_count > 0)
+          ++ok_count;
       }
     };
 
-    timer->expires_after(std::chrono::milliseconds(100));
-    timer->async_wait([check_done](boost::system::error_code) {
-      (*check_done)();
-    });
+    export_entities(entities::MAIN_ENTITIES, entities::MAIN_ENTITY_COUNT);
+    export_entities(entities::PNL_ENTITIES, entities::PNL_ENTITY_COUNT);
+
+    res_.result(http::status::ok);
+    res_.body() = json{
+        {"path", export_dir},
+        {"exported_tables", ok_count},
+        {"results", j_results}}
+                      .dump();
+  }
+
+  static std::string escape_csv(const std::string &s) {
+    if (s.find(',') == std::string::npos &&
+        s.find('"') == std::string::npos &&
+        s.find('\n') == std::string::npos)
+      return s;
+    std::string r = "\"";
+    for (char c : s) {
+      if (c == '"')
+        r += "\"\"";
+      else
+        r += c;
+    }
+    r += "\"";
+    return r;
   }
 
   void do_write() {
@@ -369,9 +407,6 @@ private:
   tcp::socket socket_;
   Database &db_;
   rebuilder::Rebuilder &rebuilder_;
-  HttpsPool &pool_;
-  const Config &config_;
-  std::string export_dir_;
   beast::flat_buffer buffer_;
   http::request<http::string_body> req_;
   http::response<http::string_body> res_;
@@ -382,13 +417,9 @@ private:
 // ============================================================================
 class HttpServer {
 public:
-  HttpServer(asio::io_context &ioc, Database &db, HttpsPool &pool,
-             const Config &config, unsigned short port)
+  HttpServer(asio::io_context &ioc, Database &db, unsigned short port)
       : ioc_(ioc), acceptor_(ioc, tcp::endpoint(tcp::v4(), port)), db_(db),
-        pool_(pool), config_(config), rebuilder_(db.get_duckdb()) {
-    // 设置导出目录
-    export_dir_ = fs::current_path().string() + "/data/export";
-    fs::create_directories(export_dir_);
+        rebuilder_(db.get_duckdb()) {
     std::cout << "[HTTP] 监听端口 " << port << std::endl;
     do_accept();
   }
@@ -398,8 +429,7 @@ private:
     acceptor_.async_accept(
         [this](beast::error_code ec, tcp::socket socket) {
           if (!ec) {
-            std::make_shared<HttpSession>(std::move(socket), db_, rebuilder_,
-                                          pool_, config_, export_dir_)
+            std::make_shared<HttpSession>(std::move(socket), db_, rebuilder_)
                 ->run();
           }
           do_accept();
@@ -409,8 +439,5 @@ private:
   asio::io_context &ioc_;
   tcp::acceptor acceptor_;
   Database &db_;
-  HttpsPool &pool_;
-  const Config &config_;
-  std::string export_dir_;
   rebuilder::Rebuilder rebuilder_;
 };
