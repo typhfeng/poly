@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <charconv>
 #include <chrono>
 #include <cstring>
 #include <duckdb.hpp>
@@ -26,7 +27,50 @@
 
 using json = nlohmann::json;
 
+// ============================================================================
+// Tuning parameters
+// ============================================================================
+#define REBUILD_P3_WORKERS 16         // Phase 3 parallel replay worker count
+#define REBUILD_USER_RESERVE 1200000  // Pre-allocate user map/vector capacity
+#define REBUILD_COND_RESERVE 500000   // Pre-allocate condition map capacity
+#define REBUILD_TOKEN_RESERVE 1000000 // Pre-allocate token map capacity
+
 namespace rebuild {
+
+// Transparent string hash — enables string_view lookup on string-keyed maps
+struct StringHash {
+  using is_transparent = void;
+  size_t operator()(std::string_view sv) const noexcept {
+    return std::hash<std::string_view>{}(sv);
+  }
+  size_t operator()(const std::string &s) const noexcept {
+    return std::hash<std::string_view>{}(std::string_view(s));
+  }
+};
+struct StringEqual {
+  using is_transparent = void;
+  bool operator()(std::string_view a, std::string_view b) const noexcept {
+    return a == b;
+  }
+};
+
+template <typename V>
+using StrMap = std::unordered_map<std::string, V, StringHash, StringEqual>;
+
+// Parse int64 from DuckDB string_t without heap allocation
+static int64_t parse_i64(const duckdb::string_t &s) {
+  int64_t val = 0;
+  auto [ptr, ec] = std::from_chars(s.GetData(), s.GetData() + s.GetSize(), val);
+  assert(ec == std::errc{});
+  return val;
+}
+
+// Per-scan thread-local collection (merged after all scans complete)
+struct ScanResult {
+  StrMap<std::vector<RawEvent>> user_events;
+  int64_t rows = 0;
+  int64_t events = 0;
+};
 
 class Engine {
 public:
@@ -39,8 +83,9 @@ public:
     bool expected = false;
     assert(running_.compare_exchange_strong(expected, true) && "rebuild already running");
 
-    eof_rows_ = eof_events_ = split_rows_ = split_events_ = 0;
-    merge_rows_ = merge_events_ = redemption_rows_ = redemption_events_ = 0;
+    eof_rows_ = 0; eof_events_ = 0; split_rows_ = 0; split_events_ = 0;
+    merge_rows_ = 0; merge_events_ = 0; redemption_rows_ = 0; redemption_events_ = 0;
+    eof_done_ = false; split_done_ = false; merge_done_ = false; redemption_done_ = false;
     phase1_ms_ = phase2_ms_ = phase3_ms_ = 0;
 
     phase_ = 1;
@@ -96,14 +141,18 @@ public:
     p.phase1_ms = phase1_ms_;
     p.phase2_ms = phase2_ms_;
     p.phase3_ms = phase3_ms_;
-    p.eof_rows = eof_rows_;
-    p.eof_events = eof_events_;
-    p.split_rows = split_rows_;
-    p.split_events = split_events_;
-    p.merge_rows = merge_rows_;
-    p.merge_events = merge_events_;
-    p.redemption_rows = redemption_rows_;
-    p.redemption_events = redemption_events_;
+    p.eof_rows = eof_rows_.load(std::memory_order_relaxed);
+    p.eof_events = eof_events_.load(std::memory_order_relaxed);
+    p.split_rows = split_rows_.load(std::memory_order_relaxed);
+    p.split_events = split_events_.load(std::memory_order_relaxed);
+    p.merge_rows = merge_rows_.load(std::memory_order_relaxed);
+    p.merge_events = merge_events_.load(std::memory_order_relaxed);
+    p.redemption_rows = redemption_rows_.load(std::memory_order_relaxed);
+    p.redemption_events = redemption_events_.load(std::memory_order_relaxed);
+    p.eof_done = eof_done_.load(std::memory_order_relaxed);
+    p.split_done = split_done_.load(std::memory_order_relaxed);
+    p.merge_done = merge_done_.load(std::memory_order_relaxed);
+    p.redemption_done = redemption_done_.load(std::memory_order_relaxed);
     return p;
   }
 
@@ -121,6 +170,8 @@ private:
     cond_ids_.clear();
     cond_map_.clear();
     token_map_.clear();
+    cond_map_.reserve(REBUILD_COND_RESERVE);
+    token_map_.reserve(REBUILD_TOKEN_RESERVE);
 
     auto conn = std::make_unique<duckdb::Connection>(db_);
     auto result = conn->Query(
@@ -128,51 +179,56 @@ private:
         "FROM condition");
     assert(!result->HasError());
 
-    for (size_t row = 0; row < result->RowCount(); ++row) {
-      std::string cond_id = result->GetValue(0, row).ToString();
-      int32_t outcome_count = result->GetValue(1, row).GetValue<int32_t>();
-      assert(outcome_count > 0 && outcome_count <= MAX_OUTCOMES);
+    duckdb::unique_ptr<duckdb::DataChunk> chunk;
+    while ((chunk = result->Fetch()) != nullptr && chunk->size() > 0) {
+      auto count = chunk->size();
+      auto id_col = duckdb::FlatVector::GetData<duckdb::string_t>(chunk->data[0]);
+      auto oc_col = duckdb::FlatVector::GetData<int32_t>(chunk->data[1]);
+      auto &pos_valid = duckdb::FlatVector::Validity(chunk->data[2]);
+      auto pos_col = duckdb::FlatVector::GetData<duckdb::string_t>(chunk->data[2]);
+      auto &pn_valid = duckdb::FlatVector::Validity(chunk->data[3]);
+      auto pn_col = duckdb::FlatVector::GetData<duckdb::string_t>(chunk->data[3]);
+      auto &pd_valid = duckdb::FlatVector::Validity(chunk->data[4]);
+      auto pd_col = duckdb::FlatVector::GetData<int64_t>(chunk->data[4]);
 
-      uint32_t idx = (uint32_t)conditions_.size();
-      ConditionInfo info;
-      info.outcome_count = (uint8_t)outcome_count;
+      for (duckdb::idx_t i = 0; i < count; ++i) {
+        std::string cond_id(id_col[i].GetData(), id_col[i].GetSize());
+        int32_t outcome_count = oc_col[i];
+        assert(outcome_count > 0 && outcome_count <= MAX_OUTCOMES);
 
-      // positionIds: JSON array → token_map_ entries
-      auto pos_val = result->GetValue(2, row);
-      if (!pos_val.IsNull()) {
-        std::string s = pos_val.ToString();
-        if (!s.empty()) {
-          auto arr = json::parse(s);
-          for (uint8_t i = 0; i < (uint8_t)arr.size(); ++i) {
-            token_map_[arr[i].get<std::string>()] = {idx, i};
+        uint32_t idx = (uint32_t)conditions_.size();
+        ConditionInfo info;
+        info.outcome_count = (uint8_t)outcome_count;
+
+        // positionIds: JSON array → token_map_ entries
+        if (pos_valid.RowIsValid(i)) {
+          std::string s(pos_col[i].GetData(), pos_col[i].GetSize());
+          if (!s.empty()) {
+            auto arr = json::parse(s);
+            for (uint8_t j = 0; j < (uint8_t)arr.size(); ++j)
+              token_map_[arr[j].get<std::string>()] = {idx, j};
           }
         }
-      }
 
-      // payoutNumerators: JSON array of ints/strings
-      auto pn_val = result->GetValue(3, row);
-      if (!pn_val.IsNull()) {
-        std::string s = pn_val.ToString();
-        if (!s.empty() && s != "NULL") {
-          auto arr = json::parse(s);
-          for (const auto &n : arr) {
-            info.payout_numerators.push_back(
-                n.is_string() ? std::stoll(n.get<std::string>()) : n.get<int64_t>());
+        // payoutNumerators: JSON array of ints/strings
+        if (pn_valid.RowIsValid(i)) {
+          std::string s(pn_col[i].GetData(), pn_col[i].GetSize());
+          if (!s.empty() && s != "NULL") {
+            auto arr = json::parse(s);
+            for (const auto &n : arr)
+              info.payout_numerators.push_back(
+                  n.is_string() ? std::stoll(n.get<std::string>()) : n.get<int64_t>());
           }
         }
-      }
 
-      // payoutDenominator
-      auto pd_val = result->GetValue(4, row);
-      if (!pd_val.IsNull()) {
-        std::string s = pd_val.ToString();
-        if (!s.empty())
-          info.payout_denominator = std::stoll(s);
-      }
+        // payoutDenominator
+        if (pd_valid.RowIsValid(i))
+          info.payout_denominator = pd_col[i];
 
-      conditions_.push_back(std::move(info));
-      cond_ids_.push_back(cond_id);
-      cond_map_[cond_id] = idx;
+        conditions_.push_back(std::move(info));
+        cond_ids_.push_back(std::move(cond_id));
+        cond_map_[cond_ids_.back()] = idx;
+      }
     }
 
     std::cout << "[rebuild] p1: " << conditions_.size() << " conditions, "
@@ -191,156 +247,214 @@ private:
     return it->second;
   }
 
+  static void push_user_event(StrMap<std::vector<RawEvent>> &m,
+                              const duckdb::string_t &u, const RawEvent &evt) {
+    std::string_view sv(u.GetData(), u.GetSize());
+    auto it = m.find(sv);
+    if (it == m.end())
+      it = m.emplace(std::string(sv), std::vector<RawEvent>{}).first;
+    it->second.push_back(evt);
+  }
+
   void collect_events() {
     users_.clear();
     user_map_.clear();
     user_events_.clear();
     total_events_ = 0;
+    user_map_.reserve(REBUILD_USER_RESERVE);
+    users_.reserve(REBUILD_USER_RESERVE);
+    user_events_.reserve(REBUILD_USER_RESERVE);
 
-    auto conn = std::make_unique<duckdb::Connection>(db_);
     phase_ = 2;
-    eof_events_ = scan_eof(*conn);
-    total_events_ += eof_events_;
-    phase_ = 3;
-    split_events_ = scan_split(*conn);
-    total_events_ += split_events_;
-    phase_ = 4;
-    merge_events_ = scan_merge(*conn);
-    total_events_ += merge_events_;
-    phase_ = 5;
-    redemption_events_ = scan_redemption(*conn);
-    total_events_ += redemption_events_;
 
+    // 4 parallel scans with independent connections
+    auto conn1 = std::make_unique<duckdb::Connection>(db_);
+    auto conn2 = std::make_unique<duckdb::Connection>(db_);
+    auto conn3 = std::make_unique<duckdb::Connection>(db_);
+    auto conn4 = std::make_unique<duckdb::Connection>(db_);
+
+    auto f_eof = std::async(std::launch::async, [&]() { return scan_eof_chunked(*conn1); });
+    auto f_split = std::async(std::launch::async, [&]() { return scan_split_chunked(*conn2); });
+    auto f_merge = std::async(std::launch::async, [&]() { return scan_merge_chunked(*conn3); });
+    auto f_redemption = std::async(std::launch::async, [&]() { return scan_redemption_chunked(*conn4); });
+
+    auto sr_eof = f_eof.get();
+    auto sr_split = f_split.get();
+    auto sr_merge = f_merge.get();
+    auto sr_redemption = f_redemption.get();
+
+    // Merge thread-local results into per-user event vectors
+    auto merge_fn = [&](ScanResult &sr) {
+      for (auto &[uid, evts] : sr.user_events) {
+        auto ui = intern_user(uid);
+        auto &dest = user_events_[ui];
+        if (dest.empty())
+          dest = std::move(evts);
+        else
+          dest.insert(dest.end(), evts.begin(), evts.end());
+      }
+      sr.user_events.clear();
+    };
+    merge_fn(sr_eof);
+    merge_fn(sr_split);
+    merge_fn(sr_merge);
+    merge_fn(sr_redemption);
+
+    total_events_ = eof_events_ + split_events_ + merge_events_ + redemption_events_;
+
+    std::cout << "[rebuild]   eof: " << eof_rows_ << " rows → " << eof_events_ << " events" << std::endl;
+    std::cout << "[rebuild]   split: " << split_rows_ << " rows → " << split_events_ << " events" << std::endl;
+    std::cout << "[rebuild]   merge: " << merge_rows_ << " rows → " << merge_events_ << " events" << std::endl;
+    std::cout << "[rebuild]   redemption: " << redemption_rows_ << " rows → " << redemption_events_ << " events" << std::endl;
     std::cout << "[rebuild] p2: " << total_events_ << " events → "
               << users_.size() << " users" << std::endl;
   }
 
-  // --- enriched_order_filled: 每行 → maker event + taker event (opposite side)
-  int64_t scan_eof(duckdb::Connection &conn) {
+  // --- enriched_order_filled: chunk API, returns thread-local ScanResult
+  ScanResult scan_eof_chunked(duckdb::Connection &conn) {
+    ScanResult sr;
     auto r = conn.Query(
         "SELECT timestamp, maker, taker, market, side, size, price "
         "FROM enriched_order_filled ORDER BY timestamp");
     assert(!r->HasError());
-    eof_rows_ = (int64_t)r->RowCount();
 
-    int64_t n = 0;
-    for (size_t i = 0; i < r->RowCount(); ++i) {
-      int64_t ts = r->GetValue(0, i).GetValue<int64_t>();
-      std::string maker = r->GetValue(1, i).ToString();
-      std::string taker = r->GetValue(2, i).ToString();
-      std::string market = r->GetValue(3, i).ToString();
-      std::string side = r->GetValue(4, i).ToString();
-      int64_t size = std::stoll(r->GetValue(5, i).ToString());
-      int64_t price = (int64_t)(r->GetValue(6, i).GetValue<double>() * 1000000);
+    duckdb::unique_ptr<duckdb::DataChunk> chunk;
+    while ((chunk = r->Fetch()) != nullptr && chunk->size() > 0) {
+      auto count = chunk->size();
+      auto ts = duckdb::FlatVector::GetData<int64_t>(chunk->data[0]);
+      auto maker = duckdb::FlatVector::GetData<duckdb::string_t>(chunk->data[1]);
+      auto taker = duckdb::FlatVector::GetData<duckdb::string_t>(chunk->data[2]);
+      auto market = duckdb::FlatVector::GetData<duckdb::string_t>(chunk->data[3]);
+      auto side = duckdb::FlatVector::GetData<duckdb::string_t>(chunk->data[4]);
+      auto size = duckdb::FlatVector::GetData<duckdb::string_t>(chunk->data[5]);
+      auto price = duckdb::FlatVector::GetData<double>(chunk->data[6]);
 
-      auto tok = token_map_.find(market);
-      if (tok == token_map_.end())
-        continue; // unknown token
+      sr.rows += count;
+      for (duckdb::idx_t i = 0; i < count; ++i) {
+        std::string_view market_sv(market[i].GetData(), market[i].GetSize());
+        auto tok = token_map_.find(market_sv);
+        if (tok == token_map_.end())
+          continue;
 
-      uint32_t ci = tok->second.first;
-      uint8_t ti = tok->second.second;
-      bool is_buy = (side == "Buy");
+        uint32_t ci = tok->second.first;
+        uint8_t ti = tok->second.second;
+        bool is_buy = (side[i].GetData()[0] == 'B');
+        int64_t sz = parse_i64(size[i]);
+        int64_t pr = (int64_t)(price[i] * 1000000);
 
-      // maker
-      {
-        auto ui = intern_user(maker);
-        RawEvent e{ts, ci, (uint8_t)(is_buy ? Buy : Sell), ti, 0, size, price};
-        user_events_[ui].push_back(e);
+        push_user_event(sr.user_events, maker[i],
+                        RawEvent{ts[i], ci, (uint8_t)(is_buy ? Buy : Sell), ti, 0, sz, pr});
+        push_user_event(sr.user_events, taker[i],
+                        RawEvent{ts[i], ci, (uint8_t)(is_buy ? Sell : Buy), ti, 0, sz, pr});
+        sr.events += 2;
       }
-      // taker (opposite side)
-      {
-        auto ui = intern_user(taker);
-        RawEvent e{ts, ci, (uint8_t)(is_buy ? Sell : Buy), ti, 0, size, price};
-        user_events_[ui].push_back(e);
-      }
-      n += 2;
+      eof_rows_.store(sr.rows, std::memory_order_relaxed);
     }
-    std::cout << "[rebuild]   eof: " << r->RowCount() << " rows → " << n << " events" << std::endl;
-    return n;
+    eof_events_.store(sr.events, std::memory_order_relaxed);
+    eof_done_.store(true, std::memory_order_relaxed);
+    return sr;
   }
 
-  // --- split: stakeholder gets all tokens
-  int64_t scan_split(duckdb::Connection &conn) {
+  // --- split: chunk API, returns thread-local ScanResult
+  ScanResult scan_split_chunked(duckdb::Connection &conn) {
+    ScanResult sr;
     auto r = conn.Query(
         "SELECT timestamp, stakeholder, condition, amount "
         "FROM split ORDER BY timestamp");
     assert(!r->HasError());
-    split_rows_ = (int64_t)r->RowCount();
 
-    int64_t n = 0;
-    for (size_t i = 0; i < r->RowCount(); ++i) {
-      int64_t ts = r->GetValue(0, i).GetValue<int64_t>();
-      std::string user = r->GetValue(1, i).ToString();
-      std::string cond = r->GetValue(2, i).ToString();
-      int64_t amt = std::stoll(r->GetValue(3, i).ToString());
+    duckdb::unique_ptr<duckdb::DataChunk> chunk;
+    while ((chunk = r->Fetch()) != nullptr && chunk->size() > 0) {
+      auto count = chunk->size();
+      auto ts = duckdb::FlatVector::GetData<int64_t>(chunk->data[0]);
+      auto user = duckdb::FlatVector::GetData<duckdb::string_t>(chunk->data[1]);
+      auto cond = duckdb::FlatVector::GetData<duckdb::string_t>(chunk->data[2]);
+      auto amt = duckdb::FlatVector::GetData<duckdb::string_t>(chunk->data[3]);
 
-      auto ci = cond_map_.find(cond);
-      if (ci == cond_map_.end())
-        continue;
+      sr.rows += count;
+      for (duckdb::idx_t i = 0; i < count; ++i) {
+        std::string_view cond_sv(cond[i].GetData(), cond[i].GetSize());
+        auto ci = cond_map_.find(cond_sv);
+        if (ci == cond_map_.end())
+          continue;
 
-      auto ui = intern_user(user);
-      RawEvent e{ts, ci->second, (uint8_t)Split, 0xFF, 0, amt, 0};
-      user_events_[ui].push_back(e);
-      ++n;
+        push_user_event(sr.user_events, user[i],
+                        RawEvent{ts[i], ci->second, (uint8_t)Split, 0xFF, 0, parse_i64(amt[i]), 0});
+        ++sr.events;
+      }
+      split_rows_.store(sr.rows, std::memory_order_relaxed);
     }
-    std::cout << "[rebuild]   split: " << r->RowCount() << " rows → " << n << " events" << std::endl;
-    return n;
+    split_events_.store(sr.events, std::memory_order_relaxed);
+    split_done_.store(true, std::memory_order_relaxed);
+    return sr;
   }
 
-  // --- merge: stakeholder destroys all tokens → USDC
-  int64_t scan_merge(duckdb::Connection &conn) {
+  // --- merge: chunk API, returns thread-local ScanResult
+  ScanResult scan_merge_chunked(duckdb::Connection &conn) {
+    ScanResult sr;
     auto r = conn.Query(
         "SELECT timestamp, stakeholder, condition, amount "
         "FROM merge ORDER BY timestamp");
     assert(!r->HasError());
-    merge_rows_ = (int64_t)r->RowCount();
 
-    int64_t n = 0;
-    for (size_t i = 0; i < r->RowCount(); ++i) {
-      int64_t ts = r->GetValue(0, i).GetValue<int64_t>();
-      std::string user = r->GetValue(1, i).ToString();
-      std::string cond = r->GetValue(2, i).ToString();
-      int64_t amt = std::stoll(r->GetValue(3, i).ToString());
+    duckdb::unique_ptr<duckdb::DataChunk> chunk;
+    while ((chunk = r->Fetch()) != nullptr && chunk->size() > 0) {
+      auto count = chunk->size();
+      auto ts = duckdb::FlatVector::GetData<int64_t>(chunk->data[0]);
+      auto user = duckdb::FlatVector::GetData<duckdb::string_t>(chunk->data[1]);
+      auto cond = duckdb::FlatVector::GetData<duckdb::string_t>(chunk->data[2]);
+      auto amt = duckdb::FlatVector::GetData<duckdb::string_t>(chunk->data[3]);
 
-      auto ci = cond_map_.find(cond);
-      if (ci == cond_map_.end())
-        continue;
+      sr.rows += count;
+      for (duckdb::idx_t i = 0; i < count; ++i) {
+        std::string_view cond_sv(cond[i].GetData(), cond[i].GetSize());
+        auto ci = cond_map_.find(cond_sv);
+        if (ci == cond_map_.end())
+          continue;
 
-      auto ui = intern_user(user);
-      RawEvent e{ts, ci->second, (uint8_t)Merge, 0xFF, 0, amt, 0};
-      user_events_[ui].push_back(e);
-      ++n;
+        push_user_event(sr.user_events, user[i],
+                        RawEvent{ts[i], ci->second, (uint8_t)Merge, 0xFF, 0, parse_i64(amt[i]), 0});
+        ++sr.events;
+      }
+      merge_rows_.store(sr.rows, std::memory_order_relaxed);
     }
-    std::cout << "[rebuild] merge: " << r->RowCount() << " rows → " << n << " events" << std::endl;
-    return n;
+    merge_events_.store(sr.events, std::memory_order_relaxed);
+    merge_done_.store(true, std::memory_order_relaxed);
+    return sr;
   }
 
-  // --- redemption: redeemer clears positions → USDC payout
-  int64_t scan_redemption(duckdb::Connection &conn) {
+  // --- redemption: chunk API, returns thread-local ScanResult
+  ScanResult scan_redemption_chunked(duckdb::Connection &conn) {
+    ScanResult sr;
     auto r = conn.Query(
         "SELECT timestamp, redeemer, condition, payout "
         "FROM redemption ORDER BY timestamp");
     assert(!r->HasError());
-    redemption_rows_ = (int64_t)r->RowCount();
 
-    int64_t n = 0;
-    for (size_t i = 0; i < r->RowCount(); ++i) {
-      int64_t ts = r->GetValue(0, i).GetValue<int64_t>();
-      std::string user = r->GetValue(1, i).ToString();
-      std::string cond = r->GetValue(2, i).ToString();
-      int64_t payout = std::stoll(r->GetValue(3, i).ToString());
+    duckdb::unique_ptr<duckdb::DataChunk> chunk;
+    while ((chunk = r->Fetch()) != nullptr && chunk->size() > 0) {
+      auto count = chunk->size();
+      auto ts = duckdb::FlatVector::GetData<int64_t>(chunk->data[0]);
+      auto user = duckdb::FlatVector::GetData<duckdb::string_t>(chunk->data[1]);
+      auto cond = duckdb::FlatVector::GetData<duckdb::string_t>(chunk->data[2]);
+      auto pay = duckdb::FlatVector::GetData<duckdb::string_t>(chunk->data[3]);
 
-      auto ci = cond_map_.find(cond);
-      if (ci == cond_map_.end())
-        continue;
+      sr.rows += count;
+      for (duckdb::idx_t i = 0; i < count; ++i) {
+        std::string_view cond_sv(cond[i].GetData(), cond[i].GetSize());
+        auto ci = cond_map_.find(cond_sv);
+        if (ci == cond_map_.end())
+          continue;
 
-      auto ui = intern_user(user);
-      RawEvent e{ts, ci->second, (uint8_t)Redemption, 0xFF, 0, payout, 0};
-      user_events_[ui].push_back(e);
-      ++n;
+        push_user_event(sr.user_events, user[i],
+                        RawEvent{ts[i], ci->second, (uint8_t)Redemption, 0xFF, 0, parse_i64(pay[i]), 0});
+        ++sr.events;
+      }
+      redemption_rows_.store(sr.rows, std::memory_order_relaxed);
     }
-    std::cout << "[rebuild]   redemption: " << r->RowCount() << " rows → " << n << " events" << std::endl;
-    return n;
+    redemption_events_.store(sr.events, std::memory_order_relaxed);
+    redemption_done_.store(true, std::memory_order_relaxed);
+    return sr;
   }
 
   // ==========================================================================
@@ -351,7 +465,7 @@ private:
     user_states_.resize(nu);
     processed_users_ = 0;
 
-    int nw = std::min(16u, std::max(1u, std::thread::hardware_concurrency()));
+    int nw = std::min((unsigned)REBUILD_P3_WORKERS, std::max(1u, std::thread::hardware_concurrency()));
     size_t chunk = (nu + nw - 1) / nw;
 
     std::vector<std::future<void>> futs;
@@ -530,15 +644,15 @@ private:
   duckdb::DuckDB &db_;
 
   // Phase 1
-  std::vector<ConditionInfo> conditions_;                                   // cond_idx → info
-  std::vector<std::string> cond_ids_;                                       // cond_idx → id
-  std::unordered_map<std::string, uint32_t> cond_map_;                      // id → cond_idx
-  std::unordered_map<std::string, std::pair<uint32_t, uint8_t>> token_map_; // token_id → (cond_idx, tok_idx)
+  std::vector<ConditionInfo> conditions_;          // cond_idx → info
+  std::vector<std::string> cond_ids_;              // cond_idx → id
+  StrMap<uint32_t> cond_map_;                      // id → cond_idx
+  StrMap<std::pair<uint32_t, uint8_t>> token_map_; // token_id → (cond_idx, tok_idx)
 
   // Phase 2 (freed after Phase 3)
-  std::vector<std::string> users_;                     // user_idx → id
-  std::unordered_map<std::string, uint32_t> user_map_; // id → user_idx
-  std::vector<std::vector<RawEvent>> user_events_;     // user_idx → events
+  std::vector<std::string> users_;                 // user_idx → id
+  StrMap<uint32_t> user_map_;                      // id → user_idx
+  std::vector<std::vector<RawEvent>> user_events_; // user_idx → events
 
   // Phase 3
   std::vector<UserState> user_states_; // user_idx → state
@@ -549,10 +663,11 @@ private:
   std::atomic<bool> running_{false};
   std::atomic<int> phase_{0};
   double phase1_ms_ = 0, phase2_ms_ = 0, phase3_ms_ = 0;
-  int64_t eof_rows_ = 0, eof_events_ = 0;
-  int64_t split_rows_ = 0, split_events_ = 0;
-  int64_t merge_rows_ = 0, merge_events_ = 0;
-  int64_t redemption_rows_ = 0, redemption_events_ = 0;
+  std::atomic<int64_t> eof_rows_{0}, eof_events_{0};
+  std::atomic<int64_t> split_rows_{0}, split_events_{0};
+  std::atomic<int64_t> merge_rows_{0}, merge_events_{0};
+  std::atomic<int64_t> redemption_rows_{0}, redemption_events_{0};
+  std::atomic<bool> eof_done_{false}, split_done_{false}, merge_done_{false}, redemption_done_{false};
 };
 
 } // namespace rebuild

@@ -104,6 +104,10 @@ struct RebuildProgress {
   int64_t merge_events = 0;
   int64_t redemption_rows = 0;
   int64_t redemption_events = 0;
+  bool eof_done = false;
+  bool split_done = false;
+  bool merge_done = false;
+  bool redemption_done = false;
 };
 
 } // namespace rebuild

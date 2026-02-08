@@ -296,6 +296,10 @@ private:
         {"merge_events", p.merge_events},
         {"redemption_rows", p.redemption_rows},
         {"redemption_events", p.redemption_events},
+        {"eof_done", p.eof_done},
+        {"split_done", p.split_done},
+        {"merge_done", p.merge_done},
+        {"redemption_done", p.redemption_done},
         {"phase1_ms", p.phase1_ms},
         {"phase2_ms", p.phase2_ms},
         {"phase3_ms", p.phase3_ms}}

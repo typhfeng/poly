@@ -969,28 +969,34 @@
       }
     }
 
-    // Phase 2 sub-scans
+    // Phase 2 sub-scans (parallel — all 4 run simultaneously)
     if (s.phase >= 2) {
       const scans = [
-        { ph: 2, name: "买卖", rows: s.eof_rows, events: s.eof_events },
-        { ph: 3, name: "铸币", rows: s.split_rows, events: s.split_events },
-        { ph: 4, name: "合币", rows: s.merge_rows, events: s.merge_events },
-        { ph: 5, name: "赎回", rows: s.redemption_rows,events: s.redemption_events },
+        { name: "买卖(Order)", rows: s.eof_rows, events: s.eof_events, done: s.eof_done },
+        { name: "铸币(Split)", rows: s.split_rows, events: s.split_events, done: s.split_done },
+        { name: "合币(Merge)", rows: s.merge_rows, events: s.merge_events, done: s.merge_done },
+        { name: "赎回(Redemption)", rows: s.redemption_rows, events: s.redemption_events, done: s.redemption_done },
       ];
       for (const sc of scans) {
-        if (s.phase > sc.ph) {
+        if (sc.done) {
           lines.push(
             `&nbsp;&nbsp;<span class="done">✓</span> ${sc.name}: ${pnlFmt(sc.rows)} rows → ${pnlFmt(sc.events)} 事件`,
           );
-        } else if (s.phase === sc.ph) {
-          lines.push(
-            `&nbsp;&nbsp;<span class="active">●</span> ${sc.name}: 扫描中...`,
-          );
+        } else if (s.phase >= 2 && s.phase < 6) {
+          if (sc.rows > 0) {
+            lines.push(
+              `&nbsp;&nbsp;<span class="active">●</span> ${sc.name}: ${pnlFmt(sc.rows)} rows...`,
+            );
+          } else {
+            lines.push(
+              `&nbsp;&nbsp;<span class="active">●</span> ${sc.name}: 扫描中...`,
+            );
+          }
         }
       }
       if (s.phase > 5) {
         lines.push(
-          `<span class="done">✓</span> P2: ${pnlFmt(s.total_events)} events → ${pnlFmt(s.total_users)} users (${(s.phase2_ms / 1000).toFixed(1)}s)`,
+          `<span class="done">✓</span> P2: ${pnlFmt(s.total_events)} 事件 → ${pnlFmt(s.total_users)} 用户 (${(s.phase2_ms / 1000).toFixed(1)}s)`,
         );
       }
     }
