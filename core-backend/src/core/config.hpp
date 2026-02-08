@@ -45,18 +45,9 @@ struct Config {
         sc.name = name;
         sc.subgraph_id = source["subgraph_id"].get<std::string>();
         sc.enabled = source.value("enabled", true);
-        // entities 可以是 dict {name: table} 或 array [name]
-        if (source["entities"].is_object()) {
-          for (auto &[entity_name, table_name] : source["entities"].items()) {
-            sc.entities.push_back(entity_name);
-            sc.entity_table_map[entity_name] = table_name.get<std::string>();
-          }
-        } else {
-          for (const auto &e : source["entities"]) {
-            std::string name = e.get<std::string>();
-            sc.entities.push_back(name);
-            sc.entity_table_map[name] = name; // 默认 table_name = entity_name
-          }
+        for (auto &[entity_name, table_name] : source["entities"].items()) {
+          sc.entities.push_back(entity_name);
+          sc.entity_table_map[entity_name] = table_name.get<std::string>();
         }
         if (sc.enabled) {
           config.sources.push_back(sc);

@@ -143,9 +143,7 @@ private:
     res_.set(http::field::content_type, "application/json");
 
     json stats = json::object();
-    for (size_t i = 0; i < entities::ALL_ENTITY_COUNT; ++i) {
-      const auto *e = entities::ALL_ENTITIES[i];
-      assert(e != nullptr);
+    for (const auto *e : entities::ALL_ENTITIES) {
       stats[e->table] = StatsManager::instance().get_total_count_for_entity(e->name);
     }
 
@@ -174,7 +172,7 @@ private:
     std::string entity_name = get_param("entity");
     assert(!entity_name.empty() && "Missing query parameter 'entity'");
 
-    const entities::EntityDef *e = entities::find_entity(entity_name.c_str(), entities::ALL_ENTITIES, entities::ALL_ENTITY_COUNT);
+    const entities::EntityDef *e = entities::find_entity_by_name(entity_name.c_str());
     assert(e && "Unknown entity");
 
     json schema = db_.query_json(std::string("PRAGMA table_info('") + e->table + "')");
@@ -292,8 +290,7 @@ private:
       return names;
     };
 
-    for (size_t i = 0; i < entities::ALL_ENTITY_COUNT; ++i) {
-      const auto *e = entities::ALL_ENTITIES[i];
+    for (const auto *e : entities::ALL_ENTITIES) {
       std::string table = e->table;
       std::string sql = "SELECT " + std::string(e->columns) + " FROM " + table +
                         " ORDER BY id " + order_dir + " LIMIT " + std::to_string(limit);

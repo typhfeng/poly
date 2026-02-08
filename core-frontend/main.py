@@ -108,10 +108,6 @@ async def api_graph_status_stream():
     )
 
 
-def sql_query(sql: str):
-    return backend_get("/api/sql", {"q": sql})
-
-
 @app.get("/api/sync-progress")
 async def api_sync_progress():
     return backend_get("/api/sync-progress")

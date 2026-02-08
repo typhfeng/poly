@@ -66,12 +66,6 @@ private:
 
   void release_slot() {
     --total_active_;
-    for (auto &s : schedulers_) {
-      if (!s.all_done() && s.active_count() < PARALLEL_PER_SOURCE) {
-        // 尝试启动更多任务
-        break;
-      }
-    }
   }
 
   void on_source_done() {

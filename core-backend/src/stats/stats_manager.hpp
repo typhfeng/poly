@@ -156,69 +156,29 @@ public:
   void record_success(const std::string &source, const std::string &entity,
                       int64_t records, int64_t latency_ms) {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto key = make_key(source, entity);
-    auto &stat = stats_[key];
+    auto &stat = stats_[make_key(source, entity)];
 
     stat.count += records;
-    stat.total_requests++;
     stat.success_requests++;
     stat.total_rows_synced += records;
-    stat.total_api_time_ms += latency_ms; // 累加API调用时间
-    stat.last_update = std::chrono::steady_clock::now();
 
-    // 记录最近20个延时(不持久化)
-    stat.recent_latencies.push_back(latency_ms);
-    if (stat.recent_latencies.size() > 20) {
-      stat.recent_latencies.pop_front();
-    }
-
-    // 更新成功率
-    stat.success_rate = static_cast<double>(stat.success_requests) / stat.total_requests * 100.0;
-
-    // 节流：每隔一小段时间落盘一次，允许丢最近几秒
-    auto now = std::chrono::steady_clock::now();
-    if ((now - stat.last_persist) >= kPersistInterval) {
-      save_to_db(stat);
-      stat.last_persist = now;
-    }
+    update_after_request(stat, latency_ms);
   }
 
   // 记录失败的请求(latency_ms是纯API调用时间，不含本地处理)
   void record_failure(const std::string &source, const std::string &entity, FailureKind kind, int64_t latency_ms) {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto key = make_key(source, entity);
-    auto &stat = stats_[key];
+    auto &stat = stats_[make_key(source, entity)];
 
-    stat.total_requests++;
-    stat.total_api_time_ms += latency_ms; // 累加API调用时间
-    stat.last_update = std::chrono::steady_clock::now();
-
-    if (kind == FailureKind::NETWORK)
-      ++stat.fail_network;
-    else if (kind == FailureKind::JSON)
-      ++stat.fail_json;
-    else if (kind == FailureKind::GRAPHQL)
-      ++stat.fail_graphql;
-    else if (kind == FailureKind::FORMAT)
-      ++stat.fail_format;
-    else
-      assert(false && "Unknown FailureKind");
-
-    // 记录最近20个延时(不持久化)
-    stat.recent_latencies.push_back(latency_ms);
-    if (stat.recent_latencies.size() > 20) {
-      stat.recent_latencies.pop_front();
+    switch (kind) {
+    case FailureKind::NETWORK:  ++stat.fail_network;  break;
+    case FailureKind::JSON:     ++stat.fail_json;     break;
+    case FailureKind::GRAPHQL:  ++stat.fail_graphql;  break;
+    case FailureKind::FORMAT:   ++stat.fail_format;   break;
+    default: assert(false && "Unknown FailureKind");
     }
 
-    // 更新成功率
-    stat.success_rate = static_cast<double>(stat.success_requests) / stat.total_requests * 100.0;
-
-    // 节流：每隔一小段时间落盘一次，允许丢最近几秒
-    auto now = std::chrono::steady_clock::now();
-    if ((now - stat.last_persist) >= kPersistInterval) {
-      save_to_db(stat);
-      stat.last_persist = now;
-    }
+    update_after_request(stat, latency_ms);
   }
 
   // indexer 维度失败计数(只有失败能归因)
@@ -257,6 +217,25 @@ private:
 
   std::string make_key(const std::string &source, const std::string &entity) {
     return source + "/" + entity;
+  }
+
+  // 请求后公共更新：累计、延时、成功率、节流落盘
+  void update_after_request(EntityStat &stat, int64_t latency_ms) {
+    stat.total_requests++;
+    stat.total_api_time_ms += latency_ms;
+    stat.last_update = std::chrono::steady_clock::now();
+
+    stat.recent_latencies.push_back(latency_ms);
+    if (stat.recent_latencies.size() > 20)
+      stat.recent_latencies.pop_front();
+
+    stat.success_rate = static_cast<double>(stat.success_requests) / stat.total_requests * 100.0;
+
+    auto now = std::chrono::steady_clock::now();
+    if ((now - stat.last_persist) >= kPersistInterval) {
+      save_to_db(stat);
+      stat.last_persist = now;
+    }
   }
 
   struct IndexerFailStat {

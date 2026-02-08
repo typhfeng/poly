@@ -330,8 +330,8 @@ inline const EntityDef EnrichedOrderFilled = {
 // Activity Polygon Entities (flat fields, no { id } expansion)
 // ============================================================================
 
-// Split - 铸造 (USDC → YES + NO)
-inline std::string split_to_values(const json &j) {
+// Split / Merge 共用 to_values (字段完全相同: id, timestamp, stakeholder, condition, amount)
+inline std::string split_merge_to_values(const json &j) {
   return json_str(j, "id") + "," +
          json_int(j, "timestamp") + "," +
          json_str(j, "stakeholder") + "," +
@@ -356,17 +356,9 @@ inline const EntityDef Split = {
     .sync_mode = SyncMode::TIMESTAMP,
     .order_field = "timestamp",
     .where_field = "timestamp_gte",
-    .to_values = split_to_values};
+    .to_values = split_merge_to_values};
 
 // Merge - 销毁 (YES + NO → USDC)
-inline std::string merge_to_values(const json &j) {
-  return json_str(j, "id") + "," +
-         json_int(j, "timestamp") + "," +
-         json_str(j, "stakeholder") + "," +
-         json_str(j, "condition") + "," +
-         json_int(j, "amount");
-}
-
 inline const EntityDef Merge = {
     .name = "Merge",
     .plural = "merges",
@@ -384,7 +376,7 @@ inline const EntityDef Merge = {
     .sync_mode = SyncMode::TIMESTAMP,
     .order_field = "timestamp",
     .where_field = "timestamp_gte",
-    .to_values = merge_to_values};
+    .to_values = split_merge_to_values};
 
 // Redemption - 赎回 (tokens → USDC, 市场结算后)
 inline std::string redemption_to_values(const json &j) {
@@ -444,35 +436,23 @@ inline const EntityDef PnlCondition = {
 // Entity 注册表 (按 subgraph 分组)
 // ============================================================================
 
-inline const EntityDef *POLYMARKET_ENTITIES[] = {
-    &Condition, &EnrichedOrderFilled};
-inline constexpr size_t POLYMARKET_ENTITY_COUNT = sizeof(POLYMARKET_ENTITIES) / sizeof(POLYMARKET_ENTITIES[0]);
-
-inline const EntityDef *ACTIVITY_ENTITIES[] = {
-    &Split, &Merge, &Redemption};
-inline constexpr size_t ACTIVITY_ENTITY_COUNT = sizeof(ACTIVITY_ENTITIES) / sizeof(ACTIVITY_ENTITIES[0]);
-
-inline const EntityDef *PNL_ENTITIES[] = {&PnlCondition};
-inline constexpr size_t PNL_ENTITY_COUNT = sizeof(PNL_ENTITIES) / sizeof(PNL_ENTITIES[0]);
-
-// 所有 entity (用于 stats/export)
+// 所有 entity (用于 stats/export/查找)
 inline const EntityDef *ALL_ENTITIES[] = {
     &Condition, &EnrichedOrderFilled, &Split, &Merge, &Redemption, &PnlCondition};
-inline constexpr size_t ALL_ENTITY_COUNT = sizeof(ALL_ENTITIES) / sizeof(ALL_ENTITIES[0]);
 
 // 查找 entity
-inline const EntityDef *find_entity(const char *name, const EntityDef *const *list, size_t count) {
-  for (size_t i = 0; i < count; ++i) {
-    if (std::string(list[i]->name) == name)
-      return list[i];
+inline const EntityDef *find_entity_by_name(const char *name) {
+  for (const auto *e : ALL_ENTITIES) {
+    if (std::string(e->name) == name)
+      return e;
   }
   return nullptr;
 }
 
 inline const EntityDef *find_entity_by_table(const char *table) {
-  for (size_t i = 0; i < ALL_ENTITY_COUNT; ++i) {
-    if (std::string(ALL_ENTITIES[i]->table) == table)
-      return ALL_ENTITIES[i];
+  for (const auto *e : ALL_ENTITIES) {
+    if (std::string(e->table) == table)
+      return e;
   }
   return nullptr;
 }

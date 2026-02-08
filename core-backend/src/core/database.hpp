@@ -94,17 +94,15 @@ public:
   int64_t get_table_count(const std::string &table) {
     std::lock_guard<std::mutex> rlock(read_mutex_);
     auto result = read_conn_->Query("SELECT COUNT(*) FROM " + table);
-    if (result->HasError() || result->RowCount() == 0)
-      return 0;
+    assert(!result->HasError() && "get_table_count failed");
+    assert(result->RowCount() > 0);
     return result->GetValue(0, 0).GetValue<int64_t>();
   }
 
   json query_json(const std::string &sql) {
     std::lock_guard<std::mutex> rlock(read_mutex_);
     auto result = read_conn_->Query(sql);
-    if (result->HasError()) {
-      throw std::runtime_error(result->GetError());
-    }
+    assert(!result->HasError() && "query_json failed");
 
     json rows = json::array();
     auto &types = result->types;

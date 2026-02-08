@@ -56,10 +56,8 @@ inline std::string build_target(const std::string &subgraph_id) {
 // 宏配置
 // ============================================================================
 #define GRAPHQL_BATCH_SIZE 1000
-#define DB_FLUSH_THRESHOLD GRAPHQL_BATCH_SIZE
 #define PULL_RETRY_DELAY_MS 50
 #define PULL_RETRY_MAX_DELAY_MS 200
-#define BUFFER_HARD_LIMIT 10000
 
 // ============================================================================
 // SyncIncrementalExecutor - 单个 entity 的拉取执行器
@@ -73,7 +71,7 @@ public:
                           DoneCallback on_done)
       : source_name_(source_name), entity_(entity), db_(db), pool_(pool),
         on_done_(std::move(on_done)), target_(graphql::build_target(subgraph_id)) {
-    buffer_.reserve(DB_FLUSH_THRESHOLD);
+    buffer_.reserve(GRAPHQL_BATCH_SIZE);
   }
 
   void start() {
@@ -157,9 +155,7 @@ private:
       buffer_.push_back(std::move(values));
     }
 
-    assert(buffer_.size() <= BUFFER_HARD_LIMIT && "buffer overflow");
-
-    if (buffer_.size() >= DB_FLUSH_THRESHOLD) {
+    if (buffer_.size() >= GRAPHQL_BATCH_SIZE) {
       flush_buffer();
     }
 
