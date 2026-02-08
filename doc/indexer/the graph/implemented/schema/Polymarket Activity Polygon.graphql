@@ -1,0 +1,141 @@
+# === SCALARS ===
+
+scalar BigDecimal
+scalar BigInt
+scalar Bytes
+scalar Int8
+scalar Timestamp
+
+# === ENTITIES ===
+
+type Condition {
+  # Condition ID
+  id: ID!
+}
+  # orderBy: id
+
+type FixedProductMarketMaker {
+  # Market maker address
+  id: ID!
+}
+  # orderBy: id
+
+type Merge {
+  # Transaction Hash
+  id: ID!
+  # Timestamp at which merge occurred
+  timestamp: BigInt!
+  # Address which is performing this merge
+  stakeholder: String!
+  # Token which is collateralising positions being merged
+  condition: String!
+  # The amount of collateral/outcome tokens being merged
+  amount: BigInt!
+}
+  # orderBy: id, timestamp, stakeholder, condition, amount
+
+type NegRiskConversion {
+  # Transaction Hash
+  id: ID!
+  # Timestamp at which conversion occurred
+  timestamp: BigInt!
+  # Address which is performing this conversion
+  stakeholder: String!
+  # Neg Risk Market Id assigned to the event
+  negRiskMarketId: String!
+  # The amount of each token being converted
+  amount: BigInt!
+  # The index set of the outcome tokens being converted
+  indexSet: BigInt!
+  # The number of questions at the time of conversion
+  questionCount: Int!
+}
+  # orderBy: id, timestamp, stakeholder, negRiskMarketId, amount, indexSet, questionCount
+
+type NegRiskEvent {
+  # negRiskMarketId
+  id: ID!
+  # Question Count
+  questionCount: Int!
+}
+  # orderBy: id, questionCount
+
+type Position {
+  # ERC1155 TokenID of the CTF Asset
+  id: ID!
+  # Condition that the token is linked to
+  condition: String!
+  # Outcome Index
+  outcomeIndex: BigInt!
+}
+  # orderBy: id, condition, outcomeIndex
+
+type Redemption {
+  # Transaction Hash
+  id: ID!
+  # Timestamp at which redemption occurred
+  timestamp: BigInt!
+  # Address which is redeeming these outcomes
+  redeemer: String!
+  # Condition on which redemption is occuring
+  condition: String!
+  # Outcomes which are being redeemed
+  indexSets: [BigInt!]!
+  # The amount of collateral being claimed
+  payout: BigInt!
+}
+  # orderBy: id, timestamp, redeemer, condition, indexSets, payout
+
+type Split {
+  # Transaction Hash
+  id: ID!
+  # Timestamp at which split occurred
+  timestamp: BigInt!
+  # Address which is performing this split
+  stakeholder: String!
+  # Condition on which split is occuring
+  condition: String!
+  # The amount of collateral/outcome tokens being split
+  amount: BigInt!
+}
+  # orderBy: id, timestamp, stakeholder, condition, amount
+
+type _Block_ {
+  # The hash of the block
+  hash: Bytes
+  # The block number
+  number: Int!
+  # Integer representation of the timestamp stored in blocks for the chain
+  timestamp: Int
+  # The hash of the parent block
+  parentHash: Bytes
+}
+
+"""The type for the top-level _meta field"""
+type _Meta_ {
+  # Information about a specific subgraph block. The hash of the block
+will be null if the _meta field has a block constraint that asks for
+a block number. It will be filled if the _meta field has no block constraint
+and therefore asks for the latest  block
+  block: _Block_!
+    .hash: Bytes
+    .number: Int!
+    .timestamp: Int
+    .parentHash: Bytes
+  # The deployment ID
+  deployment: String!
+  # If `true`, the subgraph encountered indexing errors at some past block
+  hasIndexingErrors: Boolean!
+}
+
+# === ENUMS ===
+
+enum Aggregation_interval {
+  hour
+  day
+}
+
+enum OrderDirection {
+  asc
+  desc
+}

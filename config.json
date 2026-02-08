@@ -9,28 +9,23 @@
       "enabled": true,
       "entities": {
         "Condition": "condition",
-        "Split": "split",
-        "Merge": "merge",
-        "Redemption": "redemption",
-        "Account": "account",
-        "EnrichedOrderFilled": "enriched_order_filled",
-        "Orderbook": "orderbook",
-        "MarketData": "market_data",
-        "MarketPosition": "market_position",
-        "MarketProfit": "market_profit",
-        "FixedProductMarketMaker": "fpmm",
-        "Transaction": "fpmm_transaction",
-        "Global": "global"
+        "EnrichedOrderFilled": "enriched_order_filled"
       }
     },
-    "Polymarket Profit and Loss": {
+    "Activity Polygon": {
+      "subgraph_id": "Bx1W4S7kDVxs9gC3s2G6DS8kdNBJNVhMviCtin2DiBp",
+      "enabled": true,
+      "entities": {
+        "Split": "split",
+        "Merge": "merge",
+        "Redemption": "redemption"
+      }
+    },
+    "Profit and Loss": {
       "subgraph_id": "6c58N5U4MtQE2Y8njfVrrAfRykzfqajMGeTMEvMmskVz",
       "enabled": true,
       "entities": {
-        "UserPosition": "user_position",
-        "Condition": "pnl_condition",
-        "NegRiskEvent": "neg_risk_event",
-        "FPMM": "pnl_fpmm"
+        "Condition": "pnl_condition"
       }
     }
   }

@@ -24,7 +24,7 @@ enum class ApiState {
 };
 
 // ============================================================================
-// 失败分类（用于 hover 展示）
+// 失败分类(用于 hover 展示)
 // ============================================================================
 enum class FailureKind : uint8_t {
   NETWORK = 0, // body empty / 网络错误
@@ -40,22 +40,22 @@ struct EntityStat {
   std::string source;
   std::string entity;
 
-  // 记录数（从 DB 初始化，之后累加）
+  // 记录数(从 DB 初始化，之后累加)
   int64_t count = 0;
 
   // 估算：单条记录的"结构体大小"(字节)，用于展示 DB 规模
   int64_t row_size_bytes = 0;
 
-  // 速度统计（历史累积，持久化到DB）
+  // 速度统计(历史累积，持久化到DB)
   int64_t total_rows_synced = 0; // 历史总同步行数
-  int64_t total_api_time_ms = 0; // 历史总API调用时间（不含本地处理）
+  int64_t total_api_time_ms = 0; // 历史总API调用时间(不含本地处理)
 
   // QoS 统计
-  std::deque<int64_t> recent_latencies; // 最近20个请求的延时（不持久化）
+  std::deque<int64_t> recent_latencies; // 最近20个请求的延时(不持久化)
   double success_rate = 100.0;          // 持久化到DB
-  int64_t total_requests = 0;           // 历史总请求数（持久化）
-  int64_t success_requests = 0;         // 历史成功请求数（持久化）
-  int64_t fail_network = 0;             // 失败分类计数（持久化）
+  int64_t total_requests = 0;           // 历史总请求数(持久化)
+  int64_t success_requests = 0;         // 历史成功请求数(持久化)
+  int64_t fail_network = 0;             // 失败分类计数(持久化)
   int64_t fail_json = 0;
   int64_t fail_graphql = 0;
   int64_t fail_format = 0;
@@ -71,22 +71,22 @@ struct EntityStat {
 };
 
 // ============================================================================
-// 全局 Entity Stats 管理器
+// 全局 Stats 管理器
 // ============================================================================
-class EntityStatsManager {
+class StatsManager {
 public:
-  static EntityStatsManager &instance() {
-    static EntityStatsManager inst;
+  static StatsManager &instance() {
+    static StatsManager inst;
     return inst;
   }
 
-  // 设置数据库连接（在启动时调用一次）
+  // 设置数据库连接(在启动时调用一次)
   void set_database(Database *db) {
     db_ = db;
   }
 
-  // 获取指定 entity（跨 source 汇总）的 count
-  // found=true 表示至少存在一个 source/entity 的统计项（即已经 init 过）
+  // 获取指定 entity(跨 source 汇总)的 count
+  // found=true 表示至少存在一个 source/entity 的统计项(即已经 init 过)
   int64_t get_total_count_for_entity(const std::string &entity, bool *found = nullptr) {
     std::lock_guard<std::mutex> lock(mutex_);
     int64_t sum = 0;
@@ -103,7 +103,7 @@ public:
     return sum;
   }
 
-  // 初始化 entity（设置初始 count，并从DB加载历史统计）
+  // 初始化 entity(设置初始 count，并从DB加载历史统计)
   void init(const std::string &source, const std::string &entity, int64_t count, int64_t row_size_bytes) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto key = make_key(source, entity);
@@ -152,76 +152,60 @@ public:
     }
   }
 
-  // 记录成功的请求（latency_ms是纯API调用时间，不含本地处理）
+  // 记录成功的请求(latency_ms是纯API调用时间，不含本地处理)
   void record_success(const std::string &source, const std::string &entity,
                       int64_t records, int64_t latency_ms) {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto key = make_key(source, entity);
-    auto &stat = stats_[key];
+    auto &stat = stats_[make_key(source, entity)];
 
     stat.count += records;
-    stat.total_requests++;
     stat.success_requests++;
     stat.total_rows_synced += records;
-    stat.total_api_time_ms += latency_ms; // 累加API调用时间
-    stat.last_update = std::chrono::steady_clock::now();
 
-    // 记录最近20个延时（不持久化）
-    stat.recent_latencies.push_back(latency_ms);
-    if (stat.recent_latencies.size() > 20) {
-      stat.recent_latencies.pop_front();
-    }
-
-    // 更新成功率
-    stat.success_rate = static_cast<double>(stat.success_requests) / stat.total_requests * 100.0;
-
-    // 节流：每隔一小段时间落盘一次，允许丢最近几秒
-    auto now = std::chrono::steady_clock::now();
-    if ((now - stat.last_persist) >= kPersistInterval) {
-      save_to_db(stat);
-      stat.last_persist = now;
-    }
+    update_after_request(stat, latency_ms);
   }
 
-  // 记录失败的请求（latency_ms是纯API调用时间，不含本地处理）
+  // 记录失败的请求(latency_ms是纯API调用时间，不含本地处理)
   void record_failure(const std::string &source, const std::string &entity, FailureKind kind, int64_t latency_ms) {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto key = make_key(source, entity);
-    auto &stat = stats_[key];
+    auto &stat = stats_[make_key(source, entity)];
 
-    stat.total_requests++;
-    stat.total_api_time_ms += latency_ms; // 累加API调用时间
-    stat.last_update = std::chrono::steady_clock::now();
-
-    if (kind == FailureKind::NETWORK)
-      ++stat.fail_network;
-    else if (kind == FailureKind::JSON)
-      ++stat.fail_json;
-    else if (kind == FailureKind::GRAPHQL)
-      ++stat.fail_graphql;
-    else if (kind == FailureKind::FORMAT)
-      ++stat.fail_format;
-    else
-      assert(false && "Unknown FailureKind");
-
-    // 记录最近20个延时（不持久化）
-    stat.recent_latencies.push_back(latency_ms);
-    if (stat.recent_latencies.size() > 20) {
-      stat.recent_latencies.pop_front();
+    switch (kind) {
+    case FailureKind::NETWORK:  ++stat.fail_network;  break;
+    case FailureKind::JSON:     ++stat.fail_json;     break;
+    case FailureKind::GRAPHQL:  ++stat.fail_graphql;  break;
+    case FailureKind::FORMAT:   ++stat.fail_format;   break;
+    default: assert(false && "Unknown FailureKind");
     }
 
-    // 更新成功率
-    stat.success_rate = static_cast<double>(stat.success_requests) / stat.total_requests * 100.0;
+    update_after_request(stat, latency_ms);
+  }
 
-    // 节流：每隔一小段时间落盘一次，允许丢最近几秒
+  // indexer 维度失败计数(只有失败能归因)
+  void record_indexer_fail(const std::string &source, const std::string &entity, const std::string &indexer) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    assert(!indexer.empty());
+    auto key = make_indexer_key(source, entity, indexer);
+    auto &st = indexer_fail_[key];
+    st.source = source;
+    st.entity = entity;
+    st.indexer = indexer;
+    if (!st.loaded && db_) {
+      load_indexer_fail_from_db_unsafe(st);
+      st.loaded = true;
+    }
+    ++st.fail_requests;
+
     auto now = std::chrono::steady_clock::now();
-    if ((now - stat.last_persist) >= kPersistInterval) {
-      save_to_db(stat);
-      stat.last_persist = now;
+    if (st.last_persist.time_since_epoch().count() == 0)
+      st.last_persist = now;
+    if ((now - st.last_persist) >= kPersistInterval) {
+      save_indexer_fail_to_db_unsafe(st);
+      st.last_persist = now;
     }
   }
 
-  // 获取所有统计（JSON dump 字符串；用于 HTTP 直接返回，避免重复序列化）
+  // 获取所有统计(JSON dump 字符串；用于 HTTP 直接返回，避免重复序列化)
   const std::string &get_all_dump() {
     std::lock_guard<std::mutex> lock(mutex_);
     rebuild_cache_if_needed_unsafe();
@@ -229,11 +213,46 @@ public:
   }
 
 private:
-  EntityStatsManager() = default;
+  StatsManager() = default;
 
   std::string make_key(const std::string &source, const std::string &entity) {
     return source + "/" + entity;
   }
+
+  // 请求后公共更新：累计、延时、成功率、节流落盘
+  void update_after_request(EntityStat &stat, int64_t latency_ms) {
+    stat.total_requests++;
+    stat.total_api_time_ms += latency_ms;
+    stat.last_update = std::chrono::steady_clock::now();
+
+    stat.recent_latencies.push_back(latency_ms);
+    if (stat.recent_latencies.size() > 20)
+      stat.recent_latencies.pop_front();
+
+    stat.success_rate = static_cast<double>(stat.success_requests) / stat.total_requests * 100.0;
+
+    auto now = std::chrono::steady_clock::now();
+    if ((now - stat.last_persist) >= kPersistInterval) {
+      save_to_db(stat);
+      stat.last_persist = now;
+    }
+  }
+
+  struct IndexerFailStat {
+    std::string source;
+    std::string entity;
+    std::string indexer;
+    int64_t fail_requests = 0;
+    bool loaded = false;
+    std::chrono::steady_clock::time_point last_persist{};
+  };
+
+  std::string make_indexer_key(const std::string &source, const std::string &entity, const std::string &indexer) {
+    return source + "/" + entity + "/" + indexer;
+  }
+
+  void load_indexer_fail_from_db_unsafe(IndexerFailStat &st);
+  void save_indexer_fail_to_db_unsafe(const IndexerFailStat &st);
 
   void rebuild_cache_if_needed_unsafe() {
     auto now = std::chrono::steady_clock::now();
@@ -244,7 +263,7 @@ private:
 
     for (auto &[key, stat] : stats_) {
       // 计算速度：基于历史累积的准确数据
-      // speed = 总同步行数 / 总API调用时间（秒）
+      // speed = 总同步行数 / 总API调用时间(秒)
       double speed = 0.0;
       if (stat.total_rows_synced > 0 && stat.total_api_time_ms > 0) {
         speed = static_cast<double>(stat.total_rows_synced) / (static_cast<double>(stat.total_api_time_ms) / 1000.0);
@@ -302,9 +321,10 @@ private:
 
   std::mutex mutex_;
   std::unordered_map<std::string, EntityStat> stats_;
+  std::unordered_map<std::string, IndexerFailStat> indexer_fail_;
   Database *db_ = nullptr;
 
-  // 缓存（避免频繁构建/序列化）
+  // 缓存(避免频繁构建/序列化)
   static constexpr auto kCacheTtl = std::chrono::milliseconds(200);
   std::chrono::steady_clock::time_point cached_at_{};
   std::string cached_dump_;
@@ -314,13 +334,13 @@ private:
 };
 
 // ============================================================================
-// EntityStatsManager 数据库操作实现
+// StatsManager 数据库操作实现
 // ============================================================================
 
-#include "db.hpp"
-#include "entities.hpp"
+#include "../core/database.hpp"
+#include "../core/entity_definition.hpp"
 
-inline void EntityStatsManager::load_from_db(EntityStat &stat) {
+inline void StatsManager::load_from_db(EntityStat &stat) {
   if (!db_)
     return;
 
@@ -346,7 +366,7 @@ inline void EntityStatsManager::load_from_db(EntityStat &stat) {
   }
 }
 
-inline void EntityStatsManager::save_to_db(const EntityStat &stat) {
+inline void StatsManager::save_to_db(const EntityStat &stat) {
   if (!db_)
     return;
 
@@ -365,5 +385,31 @@ inline void EntityStatsManager::save_to_db(const EntityStat &stat) {
       std::to_string(stat.total_rows_synced) + ", " +
       std::to_string(stat.total_api_time_ms) + ", " +
       std::to_string(stat.success_rate) + ", CURRENT_TIMESTAMP)";
+  db_->execute(sql);
+}
+
+inline void StatsManager::load_indexer_fail_from_db_unsafe(StatsManager::IndexerFailStat &st) {
+  assert(db_);
+  std::string sql =
+      "SELECT fail_requests FROM indexer_fail_meta WHERE source = " +
+      entities::escape_sql(st.source) +
+      " AND entity = " + entities::escape_sql(st.entity) +
+      " AND indexer = " + entities::escape_sql(st.indexer);
+  auto result = db_->query_json(sql);
+  if (!result.empty() && result[0].contains("fail_requests")) {
+    st.fail_requests = result[0]["fail_requests"].get<int64_t>();
+  }
+}
+
+inline void StatsManager::save_indexer_fail_to_db_unsafe(const StatsManager::IndexerFailStat &st) {
+  assert(db_);
+  std::string sql =
+      "INSERT OR REPLACE INTO indexer_fail_meta "
+      "(source, entity, indexer, fail_requests, updated_at) "
+      "VALUES (" +
+      entities::escape_sql(st.source) + ", " +
+      entities::escape_sql(st.entity) + ", " +
+      entities::escape_sql(st.indexer) + ", " +
+      std::to_string(st.fail_requests) + ", CURRENT_TIMESTAMP)";
   db_->execute(sql);
 }
