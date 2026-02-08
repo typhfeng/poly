@@ -68,7 +68,7 @@
       <button class="pnl-btn" onclick="pnlRebuildAll()" id="pnl-rebuild-btn">全量重建</button>
     </div>
   </div>
-  <div class="pnl-rebuild-log" id="pnl-rebuild-log" style="display: none"></div>
+  <div class="pnl-rebuild-log" id="pnl-rebuild-log">等待操作...</div>
 </div>
 
 <script>
@@ -89,7 +89,6 @@
     btn.disabled = true;
     btn.textContent = "重建中...";
     const log = document.getElementById("pnl-rebuild-log");
-    log.style.display = "block";
     log.innerHTML = '<span class="active">●</span> 启动中...';
 
     try {
@@ -104,7 +103,6 @@
 
   function pnlStartRebuildPolling() {
     if (_rebuildPollTimer) clearInterval(_rebuildPollTimer);
-    document.getElementById("pnl-rebuild-log").style.display = "block";
 
     _rebuildPollTimer = setInterval(async () => {
       try {
@@ -189,7 +187,6 @@
         if (typeof rpOnRebuildDone === 'function') rpOnRebuildDone();
         if (status.phase === 7) {
           pnlUpdateRebuildProgress(status);
-          document.getElementById("pnl-rebuild-log").style.display = "block";
         }
       }
     } catch (e) {}

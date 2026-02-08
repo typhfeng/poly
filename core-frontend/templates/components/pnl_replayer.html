@@ -51,7 +51,7 @@
     background: #252525;
     border: 1px solid #333;
     border-radius: 4px;
-    max-height: 200px;
+    max-height: 360px;
     overflow-y: auto;
     z-index: 100;
     display: none;
@@ -82,8 +82,7 @@
   .rp-btn-primary { background: #6366f1; }
   .rp-btn-primary:hover { background: #4f46e5; }
   .rp-query-hint { color: #666; font-size: 0.8em; margin-left: 8px; }
-  .rp-body { display: none; }
-  .rp-body.show { display: block; }
+  .rp-body { display: block; }
   .rp-meta {
     display: flex;
     gap: 15px;
@@ -368,7 +367,7 @@ function rpOnRebuildDone() { rpEnableQuery(); }
 // ============================================================================
 async function rpLoadUserList() {
   try {
-    const resp = await fetch('/api/replay-users?limit=200');
+    const resp = await fetch('/api/replay-users?limit=1000');
     _rUsers = await resp.json();
     rpRenderDropdown(_rUsers);
   } catch(e) {}
@@ -376,7 +375,7 @@ async function rpLoadUserList() {
 
 function rpRenderDropdown(users) {
   const dd = document.getElementById('rp-user-dropdown');
-  dd.innerHTML = users.slice(0,50).map(u =>
+  dd.innerHTML = users.slice(0,100).map(u =>
     `<div class="rp-user-item" onclick="rpSelectUser('${u.user_addr}')">
        <span>${u.user_addr}</span>
        <span class="count">${u.event_count}</span>
@@ -416,7 +415,7 @@ async function rpLoadUser() {
     _rCursorIdx = _rTimeline.length - 1;
     rpDraw();
     rpUpdateCursor();
-    document.getElementById('rp-body').classList.add('show');
+    // body is always visible
   } catch(e) {
     console.error('rpLoadUser', e);
   } finally {
@@ -432,9 +431,18 @@ function rpRenderMeta() {
   const d = _rData;
   const nCond = Object.keys(d.conditions).length;
   const finalPnl = _rTimeline.length ? _rTimeline[_rTimeline.length-1].rpnl / 1e6 : 0;
-  const pnlClass = finalPnl >= 0 ? 'pos' : 'neg';
+
+  // Count per event type: 0=Buy, 1=Sell, 2=Split, 3=Merge, 4=Redeem
+  const typeCounts = [0,0,0,0,0];
+  for (const e of _rTimeline) typeCounts[e.ty]++;
+
   document.getElementById('rp-meta').innerHTML = `
     <div class="rp-meta-item"><div class="label">事件</div><div class="value">${d.total_events}</div></div>
+    <div class="rp-meta-item"><div class="label" style="color:${_rEvtColors[0]}">Buy</div><div class="value">${typeCounts[0]}</div></div>
+    <div class="rp-meta-item"><div class="label" style="color:${_rEvtColors[1]}">Sell</div><div class="value">${typeCounts[1]}</div></div>
+    <div class="rp-meta-item"><div class="label" style="color:${_rEvtColors[2]}">Split</div><div class="value">${typeCounts[2]}</div></div>
+    <div class="rp-meta-item"><div class="label" style="color:${_rEvtColors[3]}">Merge</div><div class="value">${typeCounts[3]}</div></div>
+    <div class="rp-meta-item"><div class="label" style="color:${_rEvtColors[4]}">Redeem</div><div class="value">${typeCounts[4]}</div></div>
     <div class="rp-meta-item"><div class="label">问题</div><div class="value">${nCond}</div></div>
     <div class="rp-meta-item"><div class="label">最终 PnL</div><div class="value" style="color:${finalPnl>=0?'#10b981':'#ef4444'}">${rpFmtUSD(finalPnl)}</div></div>
     <div class="rp-meta-item"><div class="label">首次</div><div class="value">${d.first_ts ? new Date(d.first_ts*1000).toLocaleDateString() : '-'}</div></div>
