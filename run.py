@@ -92,15 +92,11 @@ def main():
     
     def cleanup(signum=None, frame=None):
         print("\n[run.py] 正在关闭...")
-        # 先杀 frontend 再杀 backend，避免 frontend 请求已死的 backend 报错
+        # 逐个关闭: 先 frontend 再 backend，每个等退出后再关下一个
         for p in reversed(processes):
             if p.poll() is None:
                 p.terminate()
-        for p in processes:
-            try:
-                p.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                p.kill()
+            p.wait()
         sys.exit(0)
     
     signal.signal(signal.SIGINT, cleanup)
@@ -122,7 +118,8 @@ def main():
     print("[run.py] 启动 backend...")
     backend_proc = subprocess.Popen(
         [str(BACKEND_EXE), "--config", str(CONFIG_FILE)],
-        cwd=ROOT
+        cwd=ROOT,
+        start_new_session=True,
     )
     processes.append(backend_proc)
     
@@ -135,7 +132,8 @@ def main():
     print("[run.py] 启动 frontend...")
     frontend_proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "warning"],
-        cwd=FRONTEND_DIR
+        cwd=FRONTEND_DIR,
+        start_new_session=True,
     )
     processes.append(frontend_proc)
     
