@@ -61,12 +61,6 @@ async def api_indexer_fails(source: str = Query(...), entity: str = Query(...)):
     return backend_get("/api/indexer-fails", {"source": source, "entity": entity}, default=[])
 
 
-@app.get("/api/rebuild")
-async def api_rebuild(user: str = Query(...)):
-    """API: 重建单个用户 PnL"""
-    return backend_get("/api/rebuild", {"user": user})
-
-
 @app.get("/api/rebuild-all")
 async def api_rebuild_all():
     """API: 触发全量重建"""

@@ -15,6 +15,7 @@
 
 #include "../core/database.hpp"
 #include "../core/entity_definition.hpp"
+#include "../rebuild/rebuilder.hpp"
 #include "../stats/stats_manager.hpp"
 #include "../sync/sync_token_filler.hpp"
 
@@ -30,8 +31,8 @@ using json = nlohmann::json;
 // ============================================================================
 class ApiSession : public std::enable_shared_from_this<ApiSession> {
 public:
-  ApiSession(tcp::socket socket, Database &db, SyncTokenFiller &token_filler)
-      : socket_(std::move(socket)), db_(db), token_filler_(token_filler) {}
+  ApiSession(tcp::socket socket, Database &db, SyncTokenFiller &token_filler, rebuild::Engine &rebuild_engine)
+      : socket_(std::move(socket)), db_(db), token_filler_(token_filler), rebuild_engine_(rebuild_engine) {}
 
   void run() {
     do_read();
@@ -81,6 +82,10 @@ private:
         handle_sync_state();
       } else if (target.starts_with("/api/fill-token-ids")) {
         handle_fill_token_ids();
+      } else if (target.starts_with("/api/rebuild-status")) {
+        handle_rebuild_status();
+      } else if (target.starts_with("/api/rebuild-all")) {
+        handle_rebuild_all();
       } else if (target.starts_with("/api/export-raw")) {
         handle_export_raw();
       } else {
@@ -255,6 +260,48 @@ private:
     res_.body() = json{{"status", status}}.dump();
   }
 
+  void handle_rebuild_all() {
+    res_.set(http::field::content_type, "application/json");
+    auto progress = rebuild_engine_.get_progress();
+    if (progress.running) {
+      res_.result(http::status::ok);
+      res_.body() = json{{"status", "already_running"}}.dump();
+      return;
+    }
+    // 后台线程触发重建
+    std::thread([&engine = rebuild_engine_]() {
+      engine.rebuild_all();
+    }).detach();
+    res_.result(http::status::ok);
+    res_.body() = json{{"status", "started"}}.dump();
+  }
+
+  void handle_rebuild_status() {
+    res_.set(http::field::content_type, "application/json");
+    auto p = rebuild_engine_.get_progress();
+    res_.result(http::status::ok);
+    res_.body() = json{
+        {"running", p.running},
+        {"phase", p.phase},
+        {"total_conditions", p.total_conditions},
+        {"total_tokens", p.total_tokens},
+        {"total_events", p.total_events},
+        {"total_users", p.total_users},
+        {"processed_users", p.processed_users},
+        {"eof_rows", p.eof_rows},
+        {"eof_events", p.eof_events},
+        {"split_rows", p.split_rows},
+        {"split_events", p.split_events},
+        {"merge_rows", p.merge_rows},
+        {"merge_events", p.merge_events},
+        {"redemption_rows", p.redemption_rows},
+        {"redemption_events", p.redemption_events},
+        {"phase1_ms", p.phase1_ms},
+        {"phase2_ms", p.phase2_ms},
+        {"phase3_ms", p.phase3_ms}}
+                     .dump();
+  }
+
   void handle_export_raw() {
     res_.set(http::field::content_type, "application/json");
 
@@ -381,6 +428,7 @@ private:
   tcp::socket socket_;
   Database &db_;
   SyncTokenFiller &token_filler_;
+  rebuild::Engine &rebuild_engine_;
   beast::flat_buffer buffer_;
   http::request<http::string_body> req_;
   http::response<http::string_body> res_;

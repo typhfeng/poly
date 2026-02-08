@@ -367,6 +367,7 @@
     width: 100%;
     margin: 10px 0;
     -webkit-appearance: none;
+    appearance: none;
     background: #333;
     height: 4px;
     border-radius: 2px;
@@ -396,26 +397,68 @@
     padding: 20px;
     color: #888;
   }
+
+  .pnl-rebuild-log {
+    font-family: monospace;
+    font-size: 0.8em;
+    color: #aaa;
+    padding: 8px 12px;
+    background: #151515;
+    border-radius: 4px;
+    margin-bottom: 12px;
+    line-height: 1.8;
+  }
+
+  .pnl-rebuild-log .done {
+    color: #10b981;
+  }
+
+  .pnl-rebuild-log .active {
+    color: #f59e0b;
+  }
+
+  .pnl-query-row {
+    margin-bottom: 12px;
+  }
+
+  .pnl-query-hint {
+    color: #666;
+    font-size: 0.8em;
+    margin-left: 8px;
+  }
 </style>
 
 <div class="pnl-card" id="pnl-card">
   <div class="pnl-header">
     <h2>PnL 重建器</h2>
     <div class="pnl-controls">
-      <div class="pnl-progress" id="pnl-rebuild-progress" style="display: none;">
-        <div class="pnl-progress-bar">
-          <div class="pnl-progress-fill" id="pnl-progress-fill"></div>
-        </div>
-        <span id="pnl-progress-text">0%</span>
+      <button class="pnl-btn" onclick="pnlRebuildAll()" id="pnl-rebuild-btn">
+        全量重建
+      </button>
+    </div>
+  </div>
+  <div class="pnl-rebuild-log" id="pnl-rebuild-log" style="display: none"></div>
+  <div class="pnl-query-row">
+    <div class="pnl-user-select">
+      <div class="pnl-input-wrapper">
+        <input
+          type="text"
+          class="pnl-user-input"
+          id="pnl-user-input"
+          placeholder="输入用户地址 (0x...) 或点击选择"
+          disabled
+        />
+        <div class="pnl-user-dropdown" id="pnl-user-dropdown"></div>
       </div>
-      <button class="pnl-btn" onclick="pnlRebuildAll()" id="pnl-rebuild-btn">全量重建</button>
-      <div class="pnl-user-select">
-        <div class="pnl-input-wrapper">
-          <input type="text" class="pnl-user-input" id="pnl-user-input" placeholder="输入用户地址 (0x...) 或点击选择">
-          <div class="pnl-user-dropdown" id="pnl-user-dropdown"></div>
-        </div>
-        <button class="pnl-btn pnl-btn-primary" onclick="pnlLoadUser()" id="pnl-load-btn">加载</button>
-      </div>
+      <button
+        class="pnl-btn pnl-btn-primary"
+        onclick="pnlLoadUser()"
+        id="pnl-load-btn"
+        disabled
+      >
+        查询
+      </button>
+      <span class="pnl-query-hint" id="pnl-query-hint">请先执行全量重建</span>
     </div>
   </div>
 
@@ -424,22 +467,33 @@
 
     <div class="pnl-chart-container">
       <canvas class="pnl-chart" id="pnl-chart"></canvas>
-      <div class="pnl-cursor-info" id="pnl-cursor-info" style="display: none;">
+      <div class="pnl-cursor-info" id="pnl-cursor-info" style="display: none">
         <div class="timestamp" id="pnl-cursor-time">-</div>
         <div class="value" id="pnl-cursor-value">$0.00</div>
         <div class="event" id="pnl-cursor-event"></div>
       </div>
     </div>
 
-    <input type="range" class="pnl-slider" id="pnl-slider" min="0" max="100" value="100">
+    <input
+      type="range"
+      class="pnl-slider"
+      id="pnl-slider"
+      min="0"
+      max="100"
+      value="100"
+    />
 
     <div class="pnl-details">
       <div class="pnl-panel">
-        <div class="pnl-panel-title">持仓 (<span id="pnl-position-count">0</span>)</div>
+        <div class="pnl-panel-title">
+          持仓 (<span id="pnl-position-count">0</span>)
+        </div>
         <div class="pnl-positions" id="pnl-positions"></div>
       </div>
       <div class="pnl-panel">
-        <div class="pnl-panel-title">交易记录 (<span id="pnl-trade-count">0</span>)</div>
+        <div class="pnl-panel-title">
+          交易记录 (<span id="pnl-trade-count">0</span>)
+        </div>
         <div class="pnl-trades" id="pnl-trades"></div>
       </div>
     </div>
@@ -455,7 +509,6 @@
 
   // 初始化
   document.addEventListener("DOMContentLoaded", () => {
-    pnlLoadUserList();
     pnlCheckRebuildStatus();
 
     const input = document.getElementById("pnl-user-input");
@@ -501,17 +554,24 @@
 
   function pnlRenderUserDropdown(users) {
     const dropdown = document.getElementById("pnl-user-dropdown");
-    dropdown.innerHTML = users.slice(0, 50).map(u => `
+    dropdown.innerHTML = users
+      .slice(0, 50)
+      .map(
+        (u) => `
       <div class="pnl-user-item" onclick="pnlSelectUser('${u.user_addr}')">
         <span>${u.user_addr}</span>
         <span class="count">${u.event_count} 事件</span>
       </div>
-    `).join("");
+    `,
+      )
+      .join("");
   }
 
   function pnlFilterUsers(query) {
     const q = query.toLowerCase();
-    const filtered = _pnlUsers.filter(u => u.user_addr.toLowerCase().includes(q));
+    const filtered = _pnlUsers.filter((u) =>
+      u.user_addr.toLowerCase().includes(q),
+    );
     pnlRenderUserDropdown(filtered);
     document.getElementById("pnl-user-dropdown").classList.add("show");
   }
@@ -555,8 +615,8 @@
       <div class="pnl-meta-item"><div class="label">Merge</div><div class="value">${meta.merge_count || 0}</div></div>
       <div class="pnl-meta-item"><div class="label">Redemption</div><div class="value">${meta.redemption_count || 0}</div></div>
       <div class="pnl-meta-item"><div class="label">跳过</div><div class="value">${meta.skipped_count || 0}</div></div>
-      <div class="pnl-meta-item"><div class="label">首次交易</div><div class="value">${meta.first_ts ? new Date(meta.first_ts * 1000).toLocaleDateString() : '-'}</div></div>
-      <div class="pnl-meta-item"><div class="label">最后交易</div><div class="value">${meta.last_ts ? new Date(meta.last_ts * 1000).toLocaleDateString() : '-'}</div></div>
+      <div class="pnl-meta-item"><div class="label">首次交易</div><div class="value">${meta.first_ts ? new Date(meta.first_ts * 1000).toLocaleDateString() : "-"}</div></div>
+      <div class="pnl-meta-item"><div class="label">最后交易</div><div class="value">${meta.last_ts ? new Date(meta.last_ts * 1000).toLocaleDateString() : "-"}</div></div>
     `;
 
     // 构建快照序列用于图表
@@ -588,7 +648,7 @@
       token_id: snap.token_id,
       side: snap.side,
       size: snap.size,
-      price: snap.price
+      price: snap.price,
     }));
   }
 
@@ -616,7 +676,7 @@
     }
 
     // 计算范围
-    const pnls = _pnlSnapshots.map(s => s.pnl);
+    const pnls = _pnlSnapshots.map((s) => s.pnl);
     let minPnl = Math.min(...pnls);
     let maxPnl = Math.max(...pnls);
     if (minPnl === maxPnl) {
@@ -648,7 +708,8 @@
 
     for (let i = 0; i < _pnlSnapshots.length; i++) {
       const x = padding.left + (i / (_pnlSnapshots.length - 1)) * chartW;
-      const y = padding.top + chartH * (1 - (_pnlSnapshots[i].pnl - minPnl) / pnlRange);
+      const y =
+        padding.top + chartH * (1 - (_pnlSnapshots[i].pnl - minPnl) / pnlRange);
 
       if (i === 0) {
         ctx.moveTo(x, y);
@@ -663,7 +724,12 @@
     ctx.lineTo(padding.left, h - padding.bottom);
     ctx.closePath();
 
-    const gradient = ctx.createLinearGradient(0, padding.top, 0, h - padding.bottom);
+    const gradient = ctx.createLinearGradient(
+      0,
+      padding.top,
+      0,
+      h - padding.bottom,
+    );
     gradient.addColorStop(0, "rgba(16, 185, 129, 0.3)");
     gradient.addColorStop(1, "rgba(16, 185, 129, 0)");
     ctx.fillStyle = gradient;
@@ -761,21 +827,24 @@
     countEl.textContent = posArr.length;
 
     if (posArr.length === 0) {
-      positionsEl.innerHTML = '<div style="color:#888;padding:10px;">无持仓</div>';
+      positionsEl.innerHTML =
+        '<div style="color:#888;padding:10px;">无持仓</div>';
       return;
     }
 
-    positionsEl.innerHTML = posArr.map(([token, pos]) => {
-      const pnl = pos.realized_pnl / 1000000;
-      const pnlClass = pnl >= 0 ? "positive" : "negative";
-      return `
+    positionsEl.innerHTML = posArr
+      .map(([token, pos]) => {
+        const pnl = pos.realized_pnl / 1000000;
+        const pnlClass = pnl >= 0 ? "positive" : "negative";
+        return `
         <div class="pnl-position-item">
           <span class="token" title="${token}">${token.slice(0, 20)}...</span>
           <span class="amount">${pos.amount}</span>
           <span class="pnl ${pnlClass}">${pnlFormatUSD(pnl)}</span>
         </div>
       `;
-    }).join("");
+      })
+      .join("");
   }
 
   function pnlRenderTrades(index) {
@@ -790,32 +859,37 @@
     const trades = _pnlSnapshots.slice(0, count);
 
     if (trades.length === 0) {
-      tradesEl.innerHTML = '<div style="color:#888;padding:10px;">无交易记录</div>';
+      tradesEl.innerHTML =
+        '<div style="color:#888;padding:10px;">无交易记录</div>';
       return;
     }
 
     // 显示最近 30 条，倒序
-    tradesEl.innerHTML = trades.slice(-30).reverse().map(t => {
-      let details = "";
-      if (t.event_type === "order") {
-        const side = t.side === "Buy" ? "买" : "卖";
-        details = `${side} ${t.size} @ $${t.price?.toFixed(4) || 0}`;
-      } else if (t.event_type === "merge") {
-        details = `铸造 ${t.size || "-"}`;
-      } else if (t.event_type === "redemption") {
-        details = `赎回`;
-      }
+    tradesEl.innerHTML = trades
+      .slice(-30)
+      .reverse()
+      .map((t) => {
+        let details = "";
+        if (t.event_type === "order") {
+          const side = t.side === "Buy" ? "买" : "卖";
+          details = `${side} ${t.size} @ $${t.price?.toFixed(4) || 0}`;
+        } else if (t.event_type === "merge") {
+          details = `铸造 ${t.size || "-"}`;
+        } else if (t.event_type === "redemption") {
+          details = `赎回`;
+        }
 
-      const tokenShort = t.token_id ? t.token_id.slice(0, 12) + "..." : "-";
+        const tokenShort = t.token_id ? t.token_id.slice(0, 12) + "..." : "-";
 
-      return `
+        return `
         <div class="pnl-trade-item">
           <span class="time">${new Date(t.timestamp * 1000).toLocaleTimeString()}</span>
           <span class="type ${t.event_type}">${t.event_type}</span>
           <span class="details" title="${t.token_id}">${details} | ${tokenShort}</span>
         </div>
       `;
-    }).join("");
+      })
+      .join("");
   }
 
   function pnlFormatUSD(val) {
@@ -823,10 +897,25 @@
     return sign + "$" + Math.abs(val).toFixed(2);
   }
 
+  function pnlFmt(n) {
+    if (n >= 1000000) return (n / 1000000).toFixed(1) + "M";
+    if (n >= 1000) return (n / 1000).toFixed(1) + "K";
+    return String(n);
+  }
+
+  function pnlEnableQuery() {
+    document.getElementById("pnl-user-input").disabled = false;
+    document.getElementById("pnl-load-btn").disabled = false;
+    document.getElementById("pnl-query-hint").style.display = "none";
+  }
+
   async function pnlRebuildAll() {
     const btn = document.getElementById("pnl-rebuild-btn");
     btn.disabled = true;
-    btn.textContent = "启动中...";
+    btn.textContent = "重建中...";
+    const log = document.getElementById("pnl-rebuild-log");
+    log.style.display = "block";
+    log.innerHTML = '<span class="active">●</span> 启动中...';
 
     try {
       await fetch("/api/rebuild-all");
@@ -841,7 +930,7 @@
   function pnlStartRebuildPolling() {
     if (_rebuildPollTimer) clearInterval(_rebuildPollTimer);
 
-    document.getElementById("pnl-rebuild-progress").style.display = "flex";
+    document.getElementById("pnl-rebuild-log").style.display = "block";
 
     _rebuildPollTimer = setInterval(async () => {
       try {
@@ -854,9 +943,10 @@
           _rebuildPollTimer = null;
           document.getElementById("pnl-rebuild-btn").disabled = false;
           document.getElementById("pnl-rebuild-btn").textContent = "全量重建";
-          setTimeout(() => {
-            document.getElementById("pnl-rebuild-progress").style.display = "none";
-          }, 3000);
+          if (status.total_users > 0) {
+            pnlEnableQuery();
+            pnlLoadUserList();
+          }
         }
       } catch (e) {
         console.error("查询进度失败", e);
@@ -864,16 +954,74 @@
     }, 1000);
   }
 
-  function pnlUpdateRebuildProgress(status) {
-    const fill = document.getElementById("pnl-progress-fill");
-    const text = document.getElementById("pnl-progress-text");
+  function pnlUpdateRebuildProgress(s) {
+    const log = document.getElementById("pnl-rebuild-log");
+    const lines = [];
 
-    const total = status.total_users || 1;
-    const processed = status.processed_users || 0;
-    const pct = Math.round((processed / total) * 100);
+    // Phase 1
+    if (s.phase >= 1) {
+      if (s.phase > 1) {
+        lines.push(
+          `<span class="done">✓</span> P1: ${pnlFmt(s.total_conditions)} 问题, ${pnlFmt(s.total_tokens)} 代币 (${(s.phase1_ms / 1000).toFixed(1)}s)`,
+        );
+      } else {
+        lines.push(`<span class="active">●</span> P1: 加载元数据中...`);
+      }
+    }
 
-    fill.style.width = pct + "%";
-    text.textContent = `${processed}/${total} (${pct}%)`;
+    // Phase 2 sub-scans
+    if (s.phase >= 2) {
+      const scans = [
+        { ph: 2, name: "买卖", rows: s.eof_rows, events: s.eof_events },
+        { ph: 3, name: "铸币", rows: s.split_rows, events: s.split_events },
+        { ph: 4, name: "合币", rows: s.merge_rows, events: s.merge_events },
+        { ph: 5, name: "赎回", rows: s.redemption_rows,events: s.redemption_events },
+      ];
+      for (const sc of scans) {
+        if (s.phase > sc.ph) {
+          lines.push(
+            `&nbsp;&nbsp;<span class="done">✓</span> ${sc.name}: ${pnlFmt(sc.rows)} rows → ${pnlFmt(sc.events)} 事件`,
+          );
+        } else if (s.phase === sc.ph) {
+          lines.push(
+            `&nbsp;&nbsp;<span class="active">●</span> ${sc.name}: 扫描中...`,
+          );
+        }
+      }
+      if (s.phase > 5) {
+        lines.push(
+          `<span class="done">✓</span> P2: ${pnlFmt(s.total_events)} events → ${pnlFmt(s.total_users)} users (${(s.phase2_ms / 1000).toFixed(1)}s)`,
+        );
+      }
+    }
+
+    // Phase 3
+    if (s.phase >= 6) {
+      if (s.phase > 6) {
+        lines.push(
+          `<span class="done">✓</span> P3: ${pnlFmt(s.total_users)} users 回放完成 (${(s.phase3_ms / 1000).toFixed(1)}s)`,
+        );
+      } else {
+        const pct = s.total_users
+          ? Math.round((s.processed_users / s.total_users) * 100)
+          : 0;
+        lines.push(
+          `<span class="active">●</span> P3: 回放中 ${pnlFmt(s.processed_users)}/${pnlFmt(s.total_users)} (${pct}%)`,
+        );
+      }
+    }
+
+    // Done summary
+    if (s.phase === 7) {
+      const total = ((s.phase1_ms + s.phase2_ms + s.phase3_ms) / 1000).toFixed(
+        1,
+      );
+      lines.push(
+        `<b style="color:#10b981">完成: ${pnlFmt(s.total_users)} users, ${pnlFmt(s.total_events)} events | ${total}s</b>`,
+      );
+    }
+
+    log.innerHTML = lines.join("<br>");
   }
 
   async function pnlCheckRebuildStatus() {
@@ -881,8 +1029,17 @@
       const resp = await fetch("/api/rebuild-status");
       const status = await resp.json();
       if (status.running) {
+        document.getElementById("pnl-rebuild-btn").disabled = true;
+        document.getElementById("pnl-rebuild-btn").textContent = "重建中...";
         pnlStartRebuildPolling();
+      } else if (status.total_users > 0) {
+        pnlEnableQuery();
+        pnlLoadUserList();
+        if (status.phase === 7) {
+          pnlUpdateRebuildProgress(status);
+          document.getElementById("pnl-rebuild-log").style.display = "block";
+        }
       }
-    } catch (e) { }
+    } catch (e) {}
   }
 </script>

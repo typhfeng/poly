@@ -14,36 +14,15 @@ FRONTEND_DIR = ROOT / "core-frontend"
 CONFIG_FILE = ROOT / "config.json"
 
 # Windows 下的可执行文件名
-BACKEND_EXE = BACKEND_BUILD / ("core.exe" if sys.platform == "win32" else "core")
-
-
-def need_rebuild():
-    """检查是否需要重新编译"""
-    if not BACKEND_EXE.exists():
-        return True
-    
-    # 检查源文件是否比可执行文件新
-    src_dir = BACKEND_DIR / "src"
-    if not src_dir.exists():
-        return True
-    
-    exe_mtime = BACKEND_EXE.stat().st_mtime
-    for src_file in src_dir.glob("*"):
-        if src_file.stat().st_mtime > exe_mtime:
-            return True
-    
-    cmake_file = BACKEND_DIR / "projects" / "core" / "CMakeLists.txt"
-    if cmake_file.exists() and cmake_file.stat().st_mtime > exe_mtime:
-        return True
-    
-    return False
+BACKEND_EXE = BACKEND_BUILD / \
+    ("core.exe" if sys.platform == "win32" else "core")
 
 
 def build_backend():
-    """编译 C++ backend"""
+    """编译 C++ backend (cmake 增量编译)"""
     print("[run.py] 编译 C++ backend...")
     BACKEND_BUILD.mkdir(parents=True, exist_ok=True)
-    
+
     # cmake 配置
     result = subprocess.run([
         "cmake", "..",
@@ -51,22 +30,23 @@ def build_backend():
         "-DCMAKE_CXX_COMPILER=clang++"
     ], cwd=BACKEND_BUILD)
     assert result.returncode == 0, "cmake 配置失败"
-    
+
     # cmake 编译
-    result = subprocess.run(["cmake", "--build", ".", "--config", "Release"], cwd=BACKEND_BUILD)
+    result = subprocess.run(
+        ["cmake", "--build", ".", "--config", "Release"], cwd=BACKEND_BUILD)
     assert result.returncode == 0, "编译失败"
-    
+
     print("[run.py] 编译完成")
 
 
 def check_config():
     """检查配置文件"""
     assert CONFIG_FILE.exists(), f"配置文件 {CONFIG_FILE} 不存在，请创建并填入 API_KEY"
-    
+
     import json
     with open(CONFIG_FILE) as f:
         config = json.load(f)
-    
+
     if config.get("api_key") == "YOUR_THE_GRAPH_API_KEY":
         print("[run.py] 警告: 请在 config.json 中填入有效的 The Graph API Key")
         print("[run.py] 获取 API Key: https://thegraph.com/studio/apikeys/")
@@ -89,7 +69,7 @@ def wait_for_port(host: str, port: int, timeout: int = 30):
 
 def main():
     processes = []
-    
+
     def cleanup(signum=None, frame=None):
         print("\n[run.py] 正在关闭...")
         # 逐个关闭: 先 frontend 再 backend，每个等退出后再关下一个
@@ -98,22 +78,19 @@ def main():
                 p.terminate()
             p.wait()
         sys.exit(0)
-    
+
     signal.signal(signal.SIGINT, cleanup)
     signal.signal(signal.SIGTERM, cleanup)
-    
+
     # 1. 检查配置
     check_config()
-    
+
     # 1.5 确保 data 目录存在
     (ROOT / "data").mkdir(exist_ok=True)
-    
-    # 2. 编译 C++ backend(如果需要)
-    if need_rebuild():
-        build_backend()
-    else:
-        print("[run.py] backend 已是最新，跳过编译")
-    
+
+    # 2. 编译 C++ backend (cmake 自带增量编译)
+    build_backend()
+
     # 3. 启动 C++ backend(后台)
     print("[run.py] 启动 backend...")
     backend_proc = subprocess.Popen(
@@ -122,27 +99,28 @@ def main():
         start_new_session=True,
     )
     processes.append(backend_proc)
-    
+
     # 3.5 等待 backend API 就绪
     print("[run.py] 等待 backend API 就绪...")
     assert wait_for_port("127.0.0.1", 8001), "backend API 启动超时"
     print("[run.py] backend API 已就绪")
-    
+
     # 4. 启动 Python frontend(后台)
     print("[run.py] 启动 frontend...")
     frontend_proc = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "warning"],
+        [sys.executable, "-m", "uvicorn", "main:app", "--host",
+            "0.0.0.0", "--port", "8000", "--log-level", "warning"],
         cwd=FRONTEND_DIR,
         start_new_session=True,
     )
     processes.append(frontend_proc)
-    
+
     # 5. 等待服务就绪，打开浏览器
     time.sleep(2)
     url = "http://localhost:8000"
     print(f"[run.py] 打开浏览器: {url}")
     webbrowser.open(url)
-    
+
     # 6. 等待进程退出
     print("[run.py] 服务已启动，按 Ctrl+C 退出")
     try:

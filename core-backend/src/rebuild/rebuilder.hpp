@@ -1,259 +1,558 @@
 #pragma once
 
 // ============================================================================
-// PnL Rebuilder 核心
+// PnL Rebuild Engine — 三阶段全量重建
+//
+// Phase 1: load_metadata()    — 扫描 condition 表, 构建 token→condition 映射
+// Phase 2: collect_events()   — 4次全表扫描, 事件写入 per-user 桶
+// Phase 3: replay_all()       — 并行回放, 生成 Snapshot 链, 释放 RawEvent
 // ============================================================================
 
-// 1. **Split(铸造)— 市场进行中**
-//    - 操作: USDC → YES + NO (固定 $0.50/$0.50)
-//    - 做市: 铸造后挂单卖双边，提供流动性
-//    - 套利: 当 YES + NO 市场价之和 > $1 时，铸造后卖双边获利
-//    - 方向性建仓: 当看空方流动性好时，铸造后卖看空方，建仓看多方
-// 
-// 2. **Merge(销毁)— 市场进行中**
-//    - 操作: YES + NO → USDC (固定 $0.50/$0.50)
-//    - 做市: 买入双边后销毁，退出流动性
-//    - 套利: 当 YES + NO 市场价之和 < $1 时，买双边后销毁获利
-//    - 方向性平仓: 当看多方流动性差时，买看空方后销毁双边，平仓看多方
-// 
-// 3. **Redemption(赎回)— 市场结算后**
-//    - 操作: tokens → USDC (只能在市场结算后操作)
-//    - 用途: 赎回 winning tokens 获得收益，losing tokens 归零 (价格由 payoutNumerators/payoutDenominator 决定)
-
-#include "rebuilder_loader.hpp"
 #include "rebuilder_types.hpp"
-#include "rebuilder_worker.hpp"
 
+#include <algorithm>
 #include <atomic>
+#include <cassert>
+#include <chrono>
+#include <cstring>
 #include <duckdb.hpp>
 #include <future>
 #include <iostream>
-#include <mutex>
 #include <nlohmann/json.hpp>
-#include <shared_mutex>
+#include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 using json = nlohmann::json;
 
-namespace rebuilder {
+namespace rebuild {
 
-class Rebuilder {
+class Engine {
 public:
-  explicit Rebuilder(duckdb::DuckDB &db) : db_(db) {}
+  explicit Engine(duckdb::DuckDB &db) : db_(db) {}
 
-  // 重建单个用户(使用缓存的conditions)
-  UserResult rebuild_user(const std::string &user) {
-    auto conn = std::make_unique<duckdb::Connection>(db_);
-    Loader loader(*conn);
-
-    // 使用缓存的conditions
-    const auto &configs = get_cached_conditions(loader);
-    auto events = loader.load_user_events(user);
-
-    return Worker::process_user(user, events, configs);
-  }
-
-  // 全量重建(并行)
-  // 返回空vector表示已有任务在运行
-  std::vector<UserResult> rebuild_all() {
-    // 原子CAS：仅当running==false时设置为true
+  // ==========================================================================
+  // 入口: 全量重建
+  // ==========================================================================
+  void rebuild_all() {
     bool expected = false;
-    if (!progress_.running.compare_exchange_strong(expected, true)) {
-      // 已有任务在运行
-      return {};
-    }
+    assert(running_.compare_exchange_strong(expected, true) && "rebuild already running");
 
-    // 重置进度
-    progress_.total_users = 0;
-    progress_.processed_users = 0;
-    progress_.total_events = 0;
-    progress_.processed_events = 0;
-    progress_.error.clear();
+    eof_rows_ = eof_events_ = split_rows_ = split_events_ = 0;
+    merge_rows_ = merge_events_ = redemption_rows_ = redemption_events_ = 0;
+    phase1_ms_ = phase2_ms_ = phase3_ms_ = 0;
 
-    auto conn = std::make_unique<duckdb::Connection>(db_);
-    Loader loader(*conn);
+    phase_ = 1;
+    auto t0 = clock::now();
+    load_metadata();
+    phase1_ms_ = ms_since(t0);
 
-    // 加载配置(共享)并更新缓存
-    std::cout << "[Rebuilder] Loading conditions..." << std::endl;
-    auto configs = loader.load_conditions();
-    update_cached_conditions(std::move(configs));
-    const auto &cached = get_cached_conditions(loader);  // 从缓存取引用
-    std::cout << "[Rebuilder] Loaded " << cached.size() << " conditions" << std::endl;
+    auto t1 = clock::now();
+    collect_events();
+    phase2_ms_ = ms_since(t1);
 
-    // 获取所有用户
-    std::cout << "[Rebuilder] Loading users..." << std::endl;
-    auto users = loader.get_all_users();
-    progress_.total_users = users.size();
-    std::cout << "[Rebuilder] Found " << users.size() << " users" << std::endl;
+    phase_ = 6;
+    auto t2 = clock::now();
+    replay_all();
+    phase3_ms_ = ms_since(t2);
 
-    // 统计总事件数
-    progress_.total_events = loader.count_total_events();
-    std::cout << "[Rebuilder] Total events: " << progress_.total_events << std::endl;
+    phase_ = 7;
+    running_ = false;
 
-    // 并行处理
-    int num_workers = std::max(1u, std::thread::hardware_concurrency());
-    std::cout << "[Rebuilder] Using " << num_workers << " workers" << std::endl;
-
-    std::vector<std::future<std::vector<UserResult>>> futures;
-    size_t chunk_size = (users.size() + num_workers - 1) / num_workers;
-
-    for (int i = 0; i < num_workers; ++i) {
-      size_t start = i * chunk_size;
-      size_t end = std::min(start + chunk_size, users.size());
-      if (start >= users.size())
-        break;
-
-      std::vector<std::string> user_slice(users.begin() + start, users.begin() + end);
-
-      futures.push_back(std::async(std::launch::async, [this, user_slice, &cached]() {
-        return process_user_batch(user_slice, cached);
-      }));
-    }
-
-    // 收集结果
-    std::vector<UserResult> all_results;
-    for (auto &f : futures) {
-      auto batch = f.get();
-      all_results.insert(all_results.end(),
-                         std::make_move_iterator(batch.begin()),
-                         std::make_move_iterator(batch.end()));
-    }
-
-    progress_.running = false;
-    std::cout << "[Rebuilder] Completed " << all_results.size() << " users" << std::endl;
-
-    return all_results;
+    std::cout << "[rebuild] done: "
+              << users_.size() << " users, "
+              << total_events_ << " events | "
+              << "p1=" << (int)phase1_ms_ << "ms "
+              << "p2=" << (int)phase2_ms_ << "ms "
+              << "p3=" << (int)phase3_ms_ << "ms "
+              << "total=" << (int)(phase1_ms_ + phase2_ms_ + phase3_ms_) << "ms" << std::endl;
   }
 
-  // 获取进度
+  // ==========================================================================
+  // Accessors
+  // ==========================================================================
+  const std::vector<std::string> &users() const { return users_; }
+  const std::vector<UserState> &user_states() const { return user_states_; }
+  const std::vector<ConditionInfo> &conditions() const { return conditions_; }
+  const std::vector<std::string> &condition_ids() const { return cond_ids_; }
+
+  const UserState *find_user(const std::string &user_id) const {
+    auto it = user_map_.find(user_id);
+    if (it == user_map_.end())
+      return nullptr;
+    return &user_states_[it->second];
+  }
+
   RebuildProgress get_progress() const {
-    return progress_;
-  }
-
-  // UserResult 转 JSON
-  static json result_to_json(const UserResult &r, bool include_snapshots = true) {
-    json positions = json::object();
-    for (const auto &[token_id, pos] : r.positions) {
-      positions[token_id] = {
-          {"amount", pos.amount},
-          {"avg_price", pos.avg_price},
-          {"realized_pnl", pos.realized_pnl},
-          {"total_bought", pos.total_bought}};
-    }
-
-    json neg_amounts = json::array();
-    for (const auto &[tid, ts, amt] : r.meta.negative_amounts) {
-      neg_amounts.push_back({{"token_id", tid}, {"timestamp", ts}, {"amount", amt}});
-    }
-
-    json result = {
-        {"user", r.user},
-        {"meta",
-         {{"first_ts", r.meta.first_ts},
-          {"last_ts", r.meta.last_ts},
-          {"order_count", r.meta.order_count},
-          {"merge_count", r.meta.merge_count},
-          {"redemption_count", r.meta.redemption_count},
-          {"skipped_count", r.meta.skipped_count},
-          {"missing_conditions", r.meta.missing_conditions},
-          {"unresolved_redemptions", r.meta.unresolved_redemptions},
-          {"negative_amounts", neg_amounts}}},
-        {"positions", positions},
-        {"snapshot_count", r.snapshots.size()}};
-
-    // 包含 snapshots 详情(用于前端时间线)
-    if (include_snapshots && !r.snapshots.empty()) {
-      json snapshots = json::array();
-      for (const auto &snap : r.snapshots) {
-        snapshots.push_back({
-            {"timestamp", snap.timestamp},
-            {"event_type", snap.event_type},
-            {"event_id", snap.event_id},
-            {"token_id", snap.token_id},
-            {"side", snap.side},
-            {"size", snap.size},
-            {"price", snap.price},
-            {"total_pnl", snap.total_pnl}});
-      }
-      result["snapshots"] = std::move(snapshots);
-    }
-
-    return result;
+    RebuildProgress p;
+    p.phase = phase_.load(std::memory_order_relaxed);
+    p.total_conditions = (int64_t)conditions_.size();
+    p.total_tokens = (int64_t)token_map_.size();
+    p.total_events = total_events_;
+    p.total_users = (int64_t)users_.size();
+    p.processed_users = processed_users_.load(std::memory_order_relaxed);
+    p.running = running_.load(std::memory_order_relaxed);
+    p.phase1_ms = phase1_ms_;
+    p.phase2_ms = phase2_ms_;
+    p.phase3_ms = phase3_ms_;
+    p.eof_rows = eof_rows_;
+    p.eof_events = eof_events_;
+    p.split_rows = split_rows_;
+    p.split_events = split_events_;
+    p.merge_rows = merge_rows_;
+    p.merge_events = merge_events_;
+    p.redemption_rows = redemption_rows_;
+    p.redemption_events = redemption_events_;
+    return p;
   }
 
 private:
-  // 获取缓存的conditions(若未缓存则加载)
-  const std::unordered_map<std::string, ConditionConfig> &get_cached_conditions(Loader &loader) {
-    std::shared_lock lock(conditions_mutex_);
-    if (!cached_conditions_.empty()) {
-      return cached_conditions_;
-    }
-    lock.unlock();
-
-    // 未缓存，加载并存入
-    std::unique_lock wlock(conditions_mutex_);
-    if (cached_conditions_.empty()) {
-      cached_conditions_ = loader.load_conditions();
-    }
-    return cached_conditions_;
+  using clock = std::chrono::high_resolution_clock;
+  static double ms_since(clock::time_point t) {
+    return std::chrono::duration<double, std::milli>(clock::now() - t).count();
   }
 
-  // 更新缓存
-  void update_cached_conditions(std::unordered_map<std::string, ConditionConfig> configs) {
-    std::unique_lock lock(conditions_mutex_);
-    cached_conditions_ = std::move(configs);
-  }
+  // ==========================================================================
+  // Phase 1: Metadata — condition 表 → cond_map_ + token_map_
+  // ==========================================================================
+  void load_metadata() {
+    conditions_.clear();
+    cond_ids_.clear();
+    cond_map_.clear();
+    token_map_.clear();
 
-  // 处理一批用户
-  std::vector<UserResult> process_user_batch(
-      const std::vector<std::string> &users,
-      const std::unordered_map<std::string, ConditionConfig> &configs) {
-    // 每个 worker 创建自己的连接
     auto conn = std::make_unique<duckdb::Connection>(db_);
-    Loader loader(*conn);
+    auto result = conn->Query(
+        "SELECT id, outcomeSlotCount, positionIds, payoutNumerators, payoutDenominator "
+        "FROM condition");
+    assert(!result->HasError());
 
-    std::vector<UserResult> results;
-    results.reserve(users.size());
+    for (size_t row = 0; row < result->RowCount(); ++row) {
+      std::string cond_id = result->GetValue(0, row).ToString();
+      int32_t outcome_count = result->GetValue(1, row).GetValue<int32_t>();
+      assert(outcome_count > 0 && outcome_count <= MAX_OUTCOMES);
 
-    for (const auto &user : users) {
-      auto events = loader.load_user_events(user);
-      auto result = Worker::process_user(user, events, configs);
-      results.push_back(std::move(result));
+      uint32_t idx = (uint32_t)conditions_.size();
+      ConditionInfo info;
+      info.outcome_count = (uint8_t)outcome_count;
 
-      // 更新进度
-      progress_.processed_users.fetch_add(1);
-      progress_.processed_events.fetch_add(events.size());
+      // positionIds: JSON array → token_map_ entries
+      auto pos_val = result->GetValue(2, row);
+      if (!pos_val.IsNull()) {
+        std::string s = pos_val.ToString();
+        if (!s.empty()) {
+          auto arr = json::parse(s);
+          for (uint8_t i = 0; i < (uint8_t)arr.size(); ++i) {
+            token_map_[arr[i].get<std::string>()] = {idx, i};
+          }
+        }
+      }
+
+      // payoutNumerators: JSON array of ints/strings
+      auto pn_val = result->GetValue(3, row);
+      if (!pn_val.IsNull()) {
+        std::string s = pn_val.ToString();
+        if (!s.empty() && s != "NULL") {
+          auto arr = json::parse(s);
+          for (const auto &n : arr) {
+            info.payout_numerators.push_back(
+                n.is_string() ? std::stoll(n.get<std::string>()) : n.get<int64_t>());
+          }
+        }
+      }
+
+      // payoutDenominator
+      auto pd_val = result->GetValue(4, row);
+      if (!pd_val.IsNull()) {
+        std::string s = pd_val.ToString();
+        if (!s.empty())
+          info.payout_denominator = std::stoll(s);
+      }
+
+      conditions_.push_back(std::move(info));
+      cond_ids_.push_back(cond_id);
+      cond_map_[cond_id] = idx;
     }
 
-    return results;
+    std::cout << "[rebuild] p1: " << conditions_.size() << " conditions, "
+              << token_map_.size() << " tokens" << std::endl;
   }
 
+  // ==========================================================================
+  // Phase 2: Event collection — 4 table scans → per-user RawEvent vectors
+  // ==========================================================================
+  uint32_t intern_user(const std::string &id) {
+    auto [it, ok] = user_map_.emplace(id, (uint32_t)users_.size());
+    if (ok) {
+      users_.push_back(id);
+      user_events_.emplace_back();
+    }
+    return it->second;
+  }
+
+  void collect_events() {
+    users_.clear();
+    user_map_.clear();
+    user_events_.clear();
+    total_events_ = 0;
+
+    auto conn = std::make_unique<duckdb::Connection>(db_);
+    phase_ = 2;
+    eof_events_ = scan_eof(*conn);
+    total_events_ += eof_events_;
+    phase_ = 3;
+    split_events_ = scan_split(*conn);
+    total_events_ += split_events_;
+    phase_ = 4;
+    merge_events_ = scan_merge(*conn);
+    total_events_ += merge_events_;
+    phase_ = 5;
+    redemption_events_ = scan_redemption(*conn);
+    total_events_ += redemption_events_;
+
+    std::cout << "[rebuild] p2: " << total_events_ << " events → "
+              << users_.size() << " users" << std::endl;
+  }
+
+  // --- enriched_order_filled: 每行 → maker event + taker event (opposite side)
+  int64_t scan_eof(duckdb::Connection &conn) {
+    auto r = conn.Query(
+        "SELECT timestamp, maker, taker, market, side, size, price "
+        "FROM enriched_order_filled ORDER BY timestamp");
+    assert(!r->HasError());
+    eof_rows_ = (int64_t)r->RowCount();
+
+    int64_t n = 0;
+    for (size_t i = 0; i < r->RowCount(); ++i) {
+      int64_t ts = r->GetValue(0, i).GetValue<int64_t>();
+      std::string maker = r->GetValue(1, i).ToString();
+      std::string taker = r->GetValue(2, i).ToString();
+      std::string market = r->GetValue(3, i).ToString();
+      std::string side = r->GetValue(4, i).ToString();
+      int64_t size = std::stoll(r->GetValue(5, i).ToString());
+      int64_t price = (int64_t)(r->GetValue(6, i).GetValue<double>() * 1000000);
+
+      auto tok = token_map_.find(market);
+      if (tok == token_map_.end())
+        continue; // unknown token
+
+      uint32_t ci = tok->second.first;
+      uint8_t ti = tok->second.second;
+      bool is_buy = (side == "Buy");
+
+      // maker
+      {
+        auto ui = intern_user(maker);
+        RawEvent e{ts, ci, (uint8_t)(is_buy ? Buy : Sell), ti, 0, size, price};
+        user_events_[ui].push_back(e);
+      }
+      // taker (opposite side)
+      {
+        auto ui = intern_user(taker);
+        RawEvent e{ts, ci, (uint8_t)(is_buy ? Sell : Buy), ti, 0, size, price};
+        user_events_[ui].push_back(e);
+      }
+      n += 2;
+    }
+    std::cout << "[rebuild]   eof: " << r->RowCount() << " rows → " << n << " events" << std::endl;
+    return n;
+  }
+
+  // --- split: stakeholder gets all tokens
+  int64_t scan_split(duckdb::Connection &conn) {
+    auto r = conn.Query(
+        "SELECT timestamp, stakeholder, condition, amount "
+        "FROM split ORDER BY timestamp");
+    assert(!r->HasError());
+    split_rows_ = (int64_t)r->RowCount();
+
+    int64_t n = 0;
+    for (size_t i = 0; i < r->RowCount(); ++i) {
+      int64_t ts = r->GetValue(0, i).GetValue<int64_t>();
+      std::string user = r->GetValue(1, i).ToString();
+      std::string cond = r->GetValue(2, i).ToString();
+      int64_t amt = std::stoll(r->GetValue(3, i).ToString());
+
+      auto ci = cond_map_.find(cond);
+      if (ci == cond_map_.end())
+        continue;
+
+      auto ui = intern_user(user);
+      RawEvent e{ts, ci->second, (uint8_t)Split, 0xFF, 0, amt, 0};
+      user_events_[ui].push_back(e);
+      ++n;
+    }
+    std::cout << "[rebuild]   split: " << r->RowCount() << " rows → " << n << " events" << std::endl;
+    return n;
+  }
+
+  // --- merge: stakeholder destroys all tokens → USDC
+  int64_t scan_merge(duckdb::Connection &conn) {
+    auto r = conn.Query(
+        "SELECT timestamp, stakeholder, condition, amount "
+        "FROM merge ORDER BY timestamp");
+    assert(!r->HasError());
+    merge_rows_ = (int64_t)r->RowCount();
+
+    int64_t n = 0;
+    for (size_t i = 0; i < r->RowCount(); ++i) {
+      int64_t ts = r->GetValue(0, i).GetValue<int64_t>();
+      std::string user = r->GetValue(1, i).ToString();
+      std::string cond = r->GetValue(2, i).ToString();
+      int64_t amt = std::stoll(r->GetValue(3, i).ToString());
+
+      auto ci = cond_map_.find(cond);
+      if (ci == cond_map_.end())
+        continue;
+
+      auto ui = intern_user(user);
+      RawEvent e{ts, ci->second, (uint8_t)Merge, 0xFF, 0, amt, 0};
+      user_events_[ui].push_back(e);
+      ++n;
+    }
+    std::cout << "[rebuild] merge: " << r->RowCount() << " rows → " << n << " events" << std::endl;
+    return n;
+  }
+
+  // --- redemption: redeemer clears positions → USDC payout
+  int64_t scan_redemption(duckdb::Connection &conn) {
+    auto r = conn.Query(
+        "SELECT timestamp, redeemer, condition, payout "
+        "FROM redemption ORDER BY timestamp");
+    assert(!r->HasError());
+    redemption_rows_ = (int64_t)r->RowCount();
+
+    int64_t n = 0;
+    for (size_t i = 0; i < r->RowCount(); ++i) {
+      int64_t ts = r->GetValue(0, i).GetValue<int64_t>();
+      std::string user = r->GetValue(1, i).ToString();
+      std::string cond = r->GetValue(2, i).ToString();
+      int64_t payout = std::stoll(r->GetValue(3, i).ToString());
+
+      auto ci = cond_map_.find(cond);
+      if (ci == cond_map_.end())
+        continue;
+
+      auto ui = intern_user(user);
+      RawEvent e{ts, ci->second, (uint8_t)Redemption, 0xFF, 0, payout, 0};
+      user_events_[ui].push_back(e);
+      ++n;
+    }
+    std::cout << "[rebuild]   redemption: " << r->RowCount() << " rows → " << n << " events" << std::endl;
+    return n;
+  }
+
+  // ==========================================================================
+  // Phase 3: Parallel replay — sort per-user, build Snapshots, free RawEvents
+  // ==========================================================================
+  void replay_all() {
+    size_t nu = users_.size();
+    user_states_.resize(nu);
+    processed_users_ = 0;
+
+    int nw = std::min(16u, std::max(1u, std::thread::hardware_concurrency()));
+    size_t chunk = (nu + nw - 1) / nw;
+
+    std::vector<std::future<void>> futs;
+    for (int w = 0; w < nw; ++w) {
+      size_t s = w * chunk, e = std::min(s + chunk, nu);
+      if (s >= nu)
+        break;
+      futs.push_back(std::async(std::launch::async, [this, s, e]() {
+        for (size_t u = s; u < e; ++u) {
+          replay_user(u);
+          processed_users_.fetch_add(1, std::memory_order_relaxed);
+        }
+      }));
+    }
+    for (auto &f : futs)
+      f.get();
+
+    // Free all raw events
+    user_events_.clear();
+    user_events_.shrink_to_fit();
+
+    std::cout << "[rebuild] p3: " << nu << " users, " << nw << " workers" << std::endl;
+  }
+
+  void replay_user(size_t uid) {
+    auto &events = user_events_[uid];
+
+    // Sort by timestamp
+    std::sort(events.begin(), events.end(),
+              [](const RawEvent &a, const RawEvent &b) {
+                return a.timestamp < b.timestamp;
+              });
+
+    // Per-condition replay state and snapshots
+    std::unordered_map<uint32_t, ReplayState> states;
+    std::unordered_map<uint32_t, std::vector<Snapshot>> snaps;
+
+    for (const auto &evt : events) {
+      auto &st = states[evt.cond_idx];
+      const auto &cond = conditions_[evt.cond_idx];
+
+      apply_event(evt, st, cond);
+
+      // Record snapshot
+      Snapshot snap;
+      snap.timestamp = evt.timestamp;
+      snap.delta = evt.amount;
+      snap.price = evt.price;
+      std::memcpy(snap.positions, st.positions, sizeof(st.positions));
+
+      // cost_basis = sum(cost[i]) / 1e6 → raw USDC
+      int64_t total_cost = 0;
+      for (int k = 0; k < cond.outcome_count; ++k)
+        total_cost += st.cost[k];
+      snap.cost_basis = total_cost / 1000000;
+
+      snap.realized_pnl = st.realized_pnl;
+      snap.event_type = evt.type;
+      snap.token_idx = evt.token_idx;
+      snap.outcome_count = cond.outcome_count;
+      std::memset(snap._pad, 0, sizeof(snap._pad));
+
+      snaps[evt.cond_idx].push_back(snap);
+    }
+
+    // Build UserState
+    auto &us = user_states_[uid];
+    us.conditions.clear();
+    us.conditions.reserve(snaps.size());
+    for (auto &[ci, sv] : snaps) {
+      us.conditions.push_back(UserConditionHistory{ci, std::move(sv)});
+    }
+
+    // Free raw events for this user
+    events.clear();
+    events.shrink_to_fit();
+  }
+
+  // ==========================================================================
+  // Event application logic
+  // ==========================================================================
+  static void apply_event(const RawEvent &evt, ReplayState &st, const ConditionInfo &cond) {
+    switch ((EventType)evt.type) {
+    case Buy:
+      apply_buy(evt, st);
+      break;
+    case Sell:
+      apply_sell(evt, st);
+      break;
+    case Split:
+      apply_split(evt, st, cond);
+      break;
+    case Merge:
+      apply_merge(evt, st, cond);
+      break;
+    case Redemption:
+      apply_redemption(evt, st, cond);
+      break;
+    }
+  }
+
+  // Buy token[i]: position += amount, cost += amount * price
+  static void apply_buy(const RawEvent &evt, ReplayState &st) {
+    int i = evt.token_idx;
+    assert(i < MAX_OUTCOMES);
+    st.cost[i] += evt.amount * evt.price;
+    st.positions[i] += evt.amount;
+  }
+
+  // Sell token[i]: realize PnL, reduce position proportionally
+  static void apply_sell(const RawEvent &evt, ReplayState &st) {
+    int i = evt.token_idx;
+    assert(i < MAX_OUTCOMES);
+
+    int64_t pos = st.positions[i];
+    if (pos > 0 && evt.amount > 0) {
+      int64_t sell = std::min(evt.amount, pos);
+      int64_t cost_removed = st.cost[i] * sell / pos;
+      st.realized_pnl += (sell * evt.price - cost_removed) / 1000000;
+      st.cost[i] -= cost_removed;
+      st.positions[i] -= sell;
+    } else {
+      // 无仓位，允许负仓位追踪
+      st.positions[i] -= evt.amount;
+    }
+  }
+
+  // Split: pay amount USDC → get amount of each outcome token
+  // Implied price per token = 1e6 / outcome_count
+  static void apply_split(const RawEvent &evt, ReplayState &st, const ConditionInfo &cond) {
+    int64_t implied_price = 1000000 / cond.outcome_count;
+    for (int i = 0; i < cond.outcome_count; ++i) {
+      st.cost[i] += evt.amount * implied_price;
+      st.positions[i] += evt.amount;
+    }
+  }
+
+  // Merge: destroy amount of each token → receive amount USDC
+  // Implied sell price per token = 1e6 / outcome_count
+  static void apply_merge(const RawEvent &evt, ReplayState &st, const ConditionInfo &cond) {
+    int64_t implied_price = 1000000 / cond.outcome_count;
+    for (int i = 0; i < cond.outcome_count; ++i) {
+      int64_t pos = st.positions[i];
+      if (pos > 0) {
+        int64_t sell = std::min(evt.amount, pos);
+        int64_t cost_removed = st.cost[i] * sell / pos;
+        st.realized_pnl += (sell * implied_price - cost_removed) / 1000000;
+        st.cost[i] -= cost_removed;
+        st.positions[i] -= sell;
+      } else {
+        st.positions[i] -= evt.amount;
+      }
+    }
+  }
+
+  // Redemption: clear all positions at payout price
+  static void apply_redemption(const RawEvent &evt, ReplayState &st, const ConditionInfo &cond) {
+    if (cond.payout_denominator == 0)
+      return; // 未结算
+
+    for (int i = 0; i < cond.outcome_count && i < (int)cond.payout_numerators.size(); ++i) {
+      int64_t pos = st.positions[i];
+      if (pos <= 0)
+        continue;
+      int64_t payout_price = cond.payout_numerators[i] * 1000000 / cond.payout_denominator;
+      int64_t cost_removed = st.cost[i];
+      st.realized_pnl += (pos * payout_price - cost_removed) / 1000000;
+      st.cost[i] = 0;
+      st.positions[i] = 0;
+    }
+  }
+
+  // ==========================================================================
+  // Data members
+  // ==========================================================================
   duckdb::DuckDB &db_;
 
-  // Conditions 缓存(避免每次rebuild_user都重新加载)
-  mutable std::shared_mutex conditions_mutex_;
-  std::unordered_map<std::string, ConditionConfig> cached_conditions_;
+  // Phase 1
+  std::vector<ConditionInfo> conditions_;                                   // cond_idx → info
+  std::vector<std::string> cond_ids_;                                       // cond_idx → id
+  std::unordered_map<std::string, uint32_t> cond_map_;                      // id → cond_idx
+  std::unordered_map<std::string, std::pair<uint32_t, uint8_t>> token_map_; // token_id → (cond_idx, tok_idx)
 
-  // 进度跟踪(原子操作)
-  struct AtomicProgress {
-    std::atomic<int64_t> total_users{0};
-    std::atomic<int64_t> processed_users{0};
-    std::atomic<int64_t> total_events{0};
-    std::atomic<int64_t> processed_events{0};
-    std::atomic<bool> running{false};
-    std::string error;
+  // Phase 2 (freed after Phase 3)
+  std::vector<std::string> users_;                     // user_idx → id
+  std::unordered_map<std::string, uint32_t> user_map_; // id → user_idx
+  std::vector<std::vector<RawEvent>> user_events_;     // user_idx → events
 
-    operator RebuildProgress() const {
-      return {
-          total_users.load(),
-          processed_users.load(),
-          total_events.load(),
-          processed_events.load(),
-          running.load(),
-          error};
-    }
-  } progress_;
+  // Phase 3
+  std::vector<UserState> user_states_; // user_idx → state
+
+  // Stats
+  int64_t total_events_ = 0;
+  std::atomic<int64_t> processed_users_{0};
+  std::atomic<bool> running_{false};
+  std::atomic<int> phase_{0};
+  double phase1_ms_ = 0, phase2_ms_ = 0, phase3_ms_ = 0;
+  int64_t eof_rows_ = 0, eof_events_ = 0;
+  int64_t split_rows_ = 0, split_events_ = 0;
+  int64_t merge_rows_ = 0, merge_events_ = 0;
+  int64_t redemption_rows_ = 0, redemption_events_ = 0;
 };
 
-} // namespace rebuilder
+} // namespace rebuild

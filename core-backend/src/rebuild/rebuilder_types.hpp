@@ -1,109 +1,109 @@
 #pragma once
 
-// ============================================================================
-// PnL Rebuilder 数据结构定义
-// ============================================================================
-
 #include <cstdint>
-#include <string>
-#include <tuple>
-#include <unordered_map>
 #include <vector>
 
-namespace rebuilder {
+namespace rebuild {
+
+static constexpr int MAX_OUTCOMES = 8;
 
 // ============================================================================
-// 持仓
+// Event types
 // ============================================================================
-struct Position {
-  int64_t amount = 0;       // 持仓量
-  int64_t avg_price = 0;    // 平均价 (1e6 = $1)
-  int64_t realized_pnl = 0; // 已实现盈亏
-  int64_t total_bought = 0; // 累计买入
+enum EventType : uint8_t {
+  Buy = 0,
+  Sell = 1,
+  Split = 2,
+  Merge = 3,
+  Redemption = 4,
 };
 
 // ============================================================================
-// 快照(记录每个事件后的状态)
+// Phase 1: Condition metadata (per condition)
 // ============================================================================
-struct Snapshot {
-  int64_t timestamp;
-  std::string event_type;
-  std::string event_id;
-  std::string token_id;   // 本次事件涉及的 token
-  std::string side;       // order: Buy/Sell
-  int64_t size = 0;       // order: size
-  double price = 0.0;     // order: price
-  int64_t total_pnl = 0;  // 事件后的总 PnL(realized + unrealized)
-};
-
-// ============================================================================
-// 用户元数据
-// ============================================================================
-struct UserMeta {
-  int64_t first_ts = 0;
-  int64_t last_ts = 0;
-
-  // 异常统计
-  std::vector<std::string> missing_conditions;
-  std::vector<std::string> unresolved_redemptions;
-  std::vector<std::tuple<std::string, int64_t, int64_t>> negative_amounts; // token_id, ts, amount
-
-  // 计数
-  int64_t order_count = 0;
-  int64_t merge_count = 0;
-  int64_t redemption_count = 0;
-  int64_t skipped_count = 0;
-};
-
-// ============================================================================
-// 用户重建结果
-// ============================================================================
-struct UserResult {
-  std::string user;
-  UserMeta meta;
-  std::unordered_map<std::string, Position> positions; // token_id -> Position
-  std::vector<Snapshot> snapshots;                     // 事件快照序列
-};
-
-// ============================================================================
-// Condition 配置
-// ============================================================================
-struct ConditionConfig {
-  std::vector<std::string> position_ids; // [yes_token, no_token]
-  std::vector<int64_t> payout_numerators;
+struct ConditionInfo {
+  uint8_t outcome_count = 0;
+  std::vector<int64_t> payout_numerators; // 结算后非空
   int64_t payout_denominator = 0;
 };
 
 // ============================================================================
-// 统一事件结构
+// Phase 2: Compact event — 32 bytes, DDR aligned
 // ============================================================================
-struct Event {
-  int64_t timestamp;
-  std::string event_type; // "order_maker", "order_taker", "merge", "redemption"
-  std::string event_id;
-  std::string user;
+struct RawEvent {
+  int64_t timestamp; // 8
+  uint32_t cond_idx; // 4  哪个 condition
+  uint8_t type;      // 1  EventType
+  uint8_t token_idx; // 1  哪个 token (Buy/Sell), 0xFF = all
+  uint16_t _pad;     // 2
+  int64_t amount;    // 8  raw token units (1e6 = 1 token = $1 face)
+  int64_t price;     // 8  price * 1e6
+};
+static_assert(sizeof(RawEvent) == 32);
 
-  // order 字段
-  std::string token_id;
-  std::string side; // "Buy" / "Sell"
-  int64_t size = 0;
-  double price = 0.0;
+// ============================================================================
+// Phase 3: Snapshot — 112 bytes, DDR contiguous in vector
+// ============================================================================
+struct Snapshot {
+  int64_t timestamp;               // 8
+  int64_t delta;                   // 8   event amount (raw token units)
+  int64_t price;                   // 8   event price (price * 1e6)
+  int64_t positions[MAX_OUTCOMES]; // 64  post-event positions (raw token units)
+  int64_t cost_basis;              // 8   sum of cost (raw USDC units)
+  int64_t realized_pnl;            // 8   cumulative realized PnL (raw USDC units)
+  uint8_t event_type;              // 1
+  uint8_t token_idx;               // 1
+  uint8_t outcome_count;           // 1
+  uint8_t _pad[5];                 // 5
+};
+static_assert(sizeof(Snapshot) == 112);
 
-  // merge/redemption 字段
-  std::string condition_id;
-  int64_t amount = 0; // merge.amount 或 redemption.payout
+// ============================================================================
+// Per user-condition: snapshot chain
+// ============================================================================
+struct UserConditionHistory {
+  uint32_t cond_idx;
+  std::vector<Snapshot> snapshots; // chronological, contiguous DDR
 };
 
 // ============================================================================
-// 重建进度状态
+// Per user: all conditions
+// ============================================================================
+struct UserState {
+  std::vector<UserConditionHistory> conditions;
+};
+
+// ============================================================================
+// Replay temp state (per user-condition, discarded after replay)
+// ============================================================================
+struct ReplayState {
+  int64_t positions[MAX_OUTCOMES] = {};
+  int64_t cost[MAX_OUTCOMES] = {}; // total cost per token, (amount * price_1e6) units
+  int64_t realized_pnl = 0;        // raw USDC units
+};
+
+// ============================================================================
+// Progress
 // ============================================================================
 struct RebuildProgress {
+  int phase = 0; // 0=idle 1=p1 2=p2_eof 3=p2_split 4=p2_merge 5=p2_redemption 6=p3 7=done
+  int64_t total_conditions = 0;
+  int64_t total_tokens = 0;
+  int64_t total_events = 0;
   int64_t total_users = 0;
   int64_t processed_users = 0;
-  int64_t total_events = 0;
-  int64_t processed_events = 0;
   bool running = false;
-  std::string error;
+  double phase1_ms = 0;
+  double phase2_ms = 0;
+  double phase3_ms = 0;
+  int64_t eof_rows = 0;
+  int64_t eof_events = 0;
+  int64_t split_rows = 0;
+  int64_t split_events = 0;
+  int64_t merge_rows = 0;
+  int64_t merge_events = 0;
+  int64_t redemption_rows = 0;
+  int64_t redemption_events = 0;
 };
 
-} // namespace rebuilder
+} // namespace rebuild

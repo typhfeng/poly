@@ -6,6 +6,7 @@
 #include "core/config.hpp"
 #include "core/database.hpp"
 #include "infra/https_pool.hpp"
+#include "rebuild/rebuilder.hpp"
 #include "sync/sync_incremental_coordinator.hpp"
 #include "sync/sync_token_filler.hpp"
 
@@ -49,8 +50,11 @@ int main(int argc, char *argv[]) {
   // Token ID 填充 (手动触发)
   SyncTokenFiller token_filler(db, pool, config);
 
+  // PnL 重建引擎
+  rebuild::Engine rebuild_engine(db.get_duckdb());
+
   // HTTP 服务器 (查询 API)
-  ApiServer api_server(ioc, db, token_filler, 8001);
+  ApiServer api_server(ioc, db, token_filler, rebuild_engine, 8001);
 
   // 数据拉取 (周期性增量 sync)
   SyncIncrementalCoordinator sync_coordinator(config, db, pool);

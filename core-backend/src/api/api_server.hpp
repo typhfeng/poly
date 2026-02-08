@@ -11,6 +11,7 @@
 #include <boost/beast.hpp>
 
 #include "../core/database.hpp"
+#include "../rebuild/rebuilder.hpp"
 #include "../sync/sync_token_filler.hpp"
 #include "api_session.hpp"
 
@@ -23,8 +24,8 @@ using tcp = asio::ip::tcp;
 // ============================================================================
 class ApiServer {
 public:
-  ApiServer(asio::io_context &ioc, Database &db, SyncTokenFiller &token_filler, unsigned short port)
-      : ioc_(ioc), acceptor_(ioc, tcp::endpoint(tcp::v4(), port)), db_(db), token_filler_(token_filler) {
+  ApiServer(asio::io_context &ioc, Database &db, SyncTokenFiller &token_filler, rebuild::Engine &rebuild_engine, unsigned short port)
+      : ioc_(ioc), acceptor_(ioc, tcp::endpoint(tcp::v4(), port)), db_(db), token_filler_(token_filler), rebuild_engine_(rebuild_engine) {
     std::cout << "[HTTP] 监听端口 " << port << std::endl;
     do_accept();
   }
@@ -34,7 +35,7 @@ private:
     acceptor_.async_accept(
         [this](beast::error_code ec, tcp::socket socket) {
           if (!ec) {
-            std::make_shared<ApiSession>(std::move(socket), db_, token_filler_)
+            std::make_shared<ApiSession>(std::move(socket), db_, token_filler_, rebuild_engine_)
                 ->run();
           }
           do_accept();
@@ -45,4 +46,5 @@ private:
   tcp::acceptor acceptor_;
   Database &db_;
   SyncTokenFiller &token_filler_;
+  rebuild::Engine &rebuild_engine_;
 };
